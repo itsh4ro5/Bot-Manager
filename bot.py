@@ -3,6 +3,7 @@
 """
 A Telegram Bot to manage channels with a robust Owner/Admin role system,
 mandatory join, block detection, and a Forum-based Support System.
+Features: Broadcast to Users & Post to All Channels.
 """
 
 import logging
@@ -35,8 +36,6 @@ _start_keepalive()
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TELEGRAM_BOT_TOKEN:
-    # Fallback for testing if env var is missing (Optional)
-    # TELEGRAM_BOT_TOKEN = "YOUR_TOKEN_HERE_IF_NEEDED"
     raise RuntimeError("Missing TELEGRAM_BOT_TOKEN")
 
 OWNER_ID = int(os.environ.get("OWNER_ID", 0))
@@ -49,14 +48,10 @@ LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", 0))
 
 # ==============================================================================
 # 👇👇👇 YAHAN APNA SUPPORT GROUP ID DALEIN (HARDCODED) 👇👇👇
-# Agar aap Heroku Env Variable set nahi kar pa rahe, to apna ID yahan likh dein.
-# Example: -100123456789 (Minus sign zaroori hai agar Supergroup hai)
+HARDCODED_SUPPORT_ID = -1002367377217  # <--- AAPKA GROUP ID
 # ==============================================================================
-HARDCODED_SUPPORT_ID = -1002367377217  # <--- REPLACE THIS WITH YOUR GROUP ID
 
-# Logic: Pehle Env Var check karega, agar nahi mila to upar wala ID use karega
 SUPPORT_GROUP_ID = int(os.environ.get("SUPPORT_GROUP_ID", HARDCODED_SUPPORT_ID))
-
 DATA_FILE = os.environ.get("DATA_FILE") or "bot_data.json"
 
 if OWNER_ID and OWNER_ID not in ADMIN_IDS: ADMIN_IDS.append(OWNER_ID)
@@ -76,7 +71,6 @@ logger = logging.getLogger(__name__)
 # --- PERSISTENCE ---
 def save_data():
     try:
-        # Check if path has directory structure
         if "/" in DATA_FILE: os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
         data = {
             "ADMIN_IDS": ADMIN_IDS,
@@ -111,29 +105,19 @@ def is_admin(uid): return uid in ADMIN_IDS
 # --- SUPPORT SYSTEM HELPERS ---
 async def get_or_create_user_topic(user, context):
     """Creates a forum topic in SUPPORT_GROUP_ID for the user."""
-    # Check if Support Group ID is valid (Not 0 and Not placeholder)
-    if not SUPPORT_GROUP_ID or SUPPORT_GROUP_ID == -100123456789: 
-        if SUPPORT_GROUP_ID == -100123456789:
-            logger.warning("Support Group ID is set to default placeholder. Please update it.")
-        return None
-    
-    # Return existing topic if found
-    if user.id in USER_TOPICS: 
-        return USER_TOPICS[user.id]
+    if not SUPPORT_GROUP_ID or SUPPORT_GROUP_ID == -100123456789: return None
+    if user.id in USER_TOPICS: return USER_TOPICS[user.id]
     
     try:
-        # Create Topic
         topic_name = f"{user.first_name[:30]} ({user.id})"
         topic = await context.bot.create_forum_topic(chat_id=SUPPORT_GROUP_ID, name=topic_name)
-        
         USER_TOPICS[user.id] = topic.message_thread_id
         save_data()
         
-        # Send Alert in new topic
         await context.bot.send_message(
             chat_id=SUPPORT_GROUP_ID, 
             message_thread_id=topic.message_thread_id,
-            text=f"🆕 **New Ticket Created**\nUser: {user.full_name}\nID: `{user.id}`",
+            text=f"🆕 **New Ticket**\nUser: {user.full_name}\nID: `{user.id}`",
             parse_mode='Markdown'
         )
         return topic.message_thread_id
@@ -147,21 +131,9 @@ async def send_user_info_to_topic(user, chat_id, context):
     try:
         full_chat = await context.bot.get_chat(user.id)
         bio = full_chat.bio if full_chat.bio else "No Bio"
-        username = f"@{user.username}" if user.username else "No Username"
-        
-        text = (f"ℹ️ **User Started Bot**\n\n"
-                f"👤 Name: {user.full_name}\n"
-                f"🆔 User ID: `{user.id}`\n"
-                f"💬 Chat ID: `{chat_id}`\n"
-                f"🔗 Username: {username}\n"
-                f"📝 Bio: {bio}")
-        
-        await context.bot.send_message(
-            chat_id=SUPPORT_GROUP_ID, 
-            message_thread_id=topic_id, 
-            text=text, 
-            parse_mode='Markdown'
-        )
+        username = f"@{user.username}" if user.username else "None"
+        text = (f"ℹ️ **User Info**\nName: {user.full_name}\nID: `{user.id}`\nUsername: {username}\nBio: {bio}")
+        await context.bot.send_message(chat_id=SUPPORT_GROUP_ID, message_thread_id=topic_id, text=text, parse_mode='Markdown')
     except Exception: pass
 
 # --- HELPERS ---
@@ -204,26 +176,24 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     USER_DATA[user.id] = {'full_name': user.full_name, 'username': user.username}
     save_data()
     
-    # --- SUPPORT TRIGGER ---
     if SUPPORT_GROUP_ID:
         await send_user_info_to_topic(user, chat.id, context)
 
-    # --- MENUS ---
     if is_owner(user.id):
         kb = [[InlineKeyboardButton("👑 Admin Panel", callback_data='admin_panel')], [InlineKeyboardButton("🔑 Owner Panel", callback_data='owner_panel')]]
-        await update.message.reply_text("Hello Owner!", reply_markup=InlineKeyboardMarkup(kb))
+        await update.message.reply_text("Owner Menu:", reply_markup=InlineKeyboardMarkup(kb))
     elif is_admin(user.id):
         kb = [[InlineKeyboardButton("👑 Admin Panel", callback_data='admin_panel')]]
-        await update.message.reply_text("Hello Admin!", reply_markup=InlineKeyboardMarkup(kb))
+        await update.message.reply_text("Admin Menu:", reply_markup=InlineKeyboardMarkup(kb))
     else:
         if await is_member(user.id, context):
-            kb = [[InlineKeyboardButton("🆓 Free Batches", callback_data='show_free'), InlineKeyboardButton("💎 Paid Channels", callback_data='show_paid')],
-                  [InlineKeyboardButton("📢 Channel", url=MANDATORY_CHANNEL_LINK or "#"), InlineKeyboardButton("📞 Contact Support", url=CONTACT_ADMIN_LINK or "#")],
+            kb = [[InlineKeyboardButton("🆓 Free Batches", callback_data='show_free'), InlineKeyboardButton("💎 Paid Batches", callback_data='show_paid')],
+                  [InlineKeyboardButton("📢 Channel", url=MANDATORY_CHANNEL_LINK or "#"), InlineKeyboardButton("📞 Support", url=CONTACT_ADMIN_LINK or "#")],
                   [InlineKeyboardButton("🆔 My ID", callback_data='get_my_id')]]
             await update.message.reply_text(f"Welcome {user.first_name}!", reply_markup=InlineKeyboardMarkup(kb))
         else:
-            kb = [[InlineKeyboardButton("➡️ Join Channel", url=MANDATORY_CHANNEL_LINK or "#")], [InlineKeyboardButton("✅ I have joined", callback_data='verify')]]
-            await update.message.reply_text("Please join our channel first.", reply_markup=InlineKeyboardMarkup(kb))
+            kb = [[InlineKeyboardButton("➡️ Join Channel", url=MANDATORY_CHANNEL_LINK or "#")], [InlineKeyboardButton("✅ I joined", callback_data='verify')]]
+            await update.message.reply_text("Join channel to continue.", reply_markup=InlineKeyboardMarkup(kb))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -239,9 +209,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif q.data == 'get_my_id':
         await q.answer(f"ID: {uid}", show_alert=True)
 
-    # Admin Navigation
+    # Admin
     elif q.data == 'admin_panel' and is_admin(uid):
-        kb = [[InlineKeyboardButton("📢 Broadcast", callback_data='ask_bc'), InlineKeyboardButton("✍️ Post", callback_data='ask_post')],
+        kb = [[InlineKeyboardButton("📢 Broadcast", callback_data='ask_bc'), InlineKeyboardButton("✍️ Post to Batches", callback_data='ask_post')],
               [InlineKeyboardButton("Manage Free", callback_data='mng_free'), InlineKeyboardButton("Manage Paid", callback_data='mng_paid')]]
         if is_owner(uid): kb.append([InlineKeyboardButton("Back", callback_data='main_owner')])
         await q.edit_message_text("Admin Panel:", reply_markup=InlineKeyboardMarkup(kb))
@@ -252,11 +222,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif q.data == 'main_owner': await start_command(update, context)
 
-    # Inputs
+    # Input States
     elif q.data.startswith('ask_') and is_admin(uid):
         act = q.data.split('_')[1]
         context.user_data['step'] = act
-        await q.edit_message_text(f"Send input for: {act}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data='admin_panel')]]))
+        msg_map = {
+            'bc': "Send the message (Text/Photo/Video) to BROADCAST to all users:",
+            'post': "Send the message (Text/Photo/Video) to POST in all Free Batches:"
+        }
+        prompt = msg_map.get(act, f"Send input for: {act}")
+        await q.edit_message_text(prompt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data='admin_panel')]]))
 
     # List Views
     elif q.data == 'show_free':
@@ -271,7 +246,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif q.data == 'start_member': await start_command(update, context)
 
-    # Management
+    # Managers
     elif q.data == 'mng_free':
         kb = [[InlineKeyboardButton("Add", callback_data='ask_addf'), InlineKeyboardButton("Remove", callback_data='ask_remf')],
               [InlineKeyboardButton("List", callback_data='lst_f'), InlineKeyboardButton("Back", callback_data='admin_panel')]]
@@ -287,8 +262,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
               [InlineKeyboardButton("Back", callback_data='owner_panel')]]
         await q.edit_message_text("Manage Users:", reply_markup=InlineKeyboardMarkup(kb))
 
+    # Lists
     elif q.data == 'lst_u':
-        # Simple count display for brevity
         await q.edit_message_text(f"Total Users: {len(USER_DATA)}\nBlocked: {len(BLOCKED_USER_IDS)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data='mng_users')]]))
         
     elif q.data == 'lst_f':
@@ -299,7 +274,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         txt = "\n".join(PAID_CHANNELS) or "Empty"
         await q.edit_message_text(txt[:4000], parse_mode='HTML', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data='mng_paid')]]))
 
-    # Join Actions
+    # Join
     elif q.data.startswith('join_f_'):
         cid = int(q.data.split('_')[2])
         if cid in FREE_CHANNEL_LINKS:
@@ -324,39 +299,55 @@ async def handle_message_input(update: Update, context: ContextTypes.DEFAULT_TYP
     chat = update.effective_chat
     if not user: return
 
-    # 1. ADMIN WIZARD INPUTS
+    # 1. ADMIN INPUTS
     if is_admin(user.id) and 'step' in context.user_data:
         step = context.user_data.pop('step')
-        text = update.message.text
         
+        # --- BROADCAST & POST (Handles Media Too) ---
         if step == 'bc':
-            for u in USER_DATA:
-                try: await context.bot.send_message(u, text); 
-                except: pass
-            await update.message.reply_text("Broadcast Done.")
+            status = await update.message.reply_text("⏳ Broadcasting...")
+            success, failed = 0, 0
+            for u in list(USER_DATA.keys()):
+                try: 
+                    await context.bot.copy_message(chat_id=u, from_chat_id=chat.id, message_id=update.message.id)
+                    success += 1
+                except: failed += 1
+            await context.bot.edit_message_text(chat_id=chat.id, message_id=status.message_id, text=f"✅ Broadcast Done.\nSent: {success}\nFailed: {failed}")
+            return
             
         elif step == 'post':
-            for c in FREE_CHANNELS:
-                try: await context.bot.send_message(c, text); 
-                except: pass
-            await update.message.reply_text("Posted.")
+            status = await update.message.reply_text("⏳ Posting to batches...")
+            success, failed = 0, 0
+            for c in list(FREE_CHANNELS.keys()):
+                try: 
+                    await context.bot.copy_message(chat_id=c, from_chat_id=chat.id, message_id=update.message.id)
+                    success += 1
+                except: failed += 1
+            await context.bot.edit_message_text(chat_id=chat.id, message_id=status.message_id, text=f"✅ Posted.\nSent: {success}\nFailed: {failed}")
+            return
 
-        elif step == 'addf':
+        # --- TEXT CONFIGURATIONS ---
+        text = update.message.text
+        if not text:
+            await update.message.reply_text("❌ Error: Please send text only for this setting.")
+            return
+
+        if step == 'addf':
             context.user_data['n'] = text
             context.user_data['step'] = 'addf_l'
-            await update.message.reply_text("Link:")
+            await update.message.reply_text("Send Channel Link:")
         elif step == 'addf_l':
             context.user_data['l'] = text
             context.user_data['step'] = 'addf_id'
-            await update.message.reply_text("Channel ID:")
+            await update.message.reply_text("Send Channel ID (starts with -100):")
         elif step == 'addf_id':
             try:
                 cid = int(text)
                 FREE_CHANNELS[cid] = context.user_data['n']
                 FREE_CHANNEL_LINKS[cid] = context.user_data['l']
                 save_data()
-                await update.message.reply_text("Added.")
-            except: await update.message.reply_text("Invalid ID.")
+                await update.message.reply_text("✅ Batch Added.")
+            except: await update.message.reply_text("❌ Invalid ID.")
 
         elif step == 'remf':
             try:
@@ -365,19 +356,19 @@ async def handle_message_input(update: Update, context: ContextTypes.DEFAULT_TYP
                     del FREE_CHANNELS[cid]
                     if cid in FREE_CHANNEL_LINKS: del FREE_CHANNEL_LINKS[cid]
                     save_data()
-                    await update.message.reply_text("Removed.")
-                else: await update.message.reply_text("Not found.")
+                    await update.message.reply_text("✅ Removed.")
+                else: await update.message.reply_text("❌ Not found.")
             except: pass
 
         elif step == 'addp':
             context.user_data['n'] = text
             context.user_data['step'] = 'addp_l'
-            await update.message.reply_text("Link:")
+            await update.message.reply_text("Send Link:")
         elif step == 'addp_l':
             entry = f"<a href='{text}'>{context.user_data['n']}</a>"
             PAID_CHANNELS.append(entry)
             save_data()
-            await update.message.reply_text("Added.")
+            await update.message.reply_text("✅ Paid Channel Added.")
         
         elif step == 'remp':
             try:
@@ -385,7 +376,7 @@ async def handle_message_input(update: Update, context: ContextTypes.DEFAULT_TYP
                 if 0 <= idx < len(PAID_CHANNELS):
                     PAID_CHANNELS.pop(idx)
                     save_data()
-                    await update.message.reply_text("Removed.")
+                    await update.message.reply_text("✅ Removed.")
             except: pass
 
         elif step == 'blk':
@@ -393,17 +384,16 @@ async def handle_message_input(update: Update, context: ContextTypes.DEFAULT_TYP
                 uid = int(text)
                 BLOCKED_USER_IDS.add(uid)
                 save_data()
-                await update.message.reply_text("Blocked.")
+                await update.message.reply_text("🚫 User Blocked.")
             except: pass
 
         return
 
-    # 2. SUPPORT FORWARDING (Private Chat -> Topic)
+    # 2. SUPPORT FORWARDING
     if chat.type == ChatType.PRIVATE and SUPPORT_GROUP_ID:
         topic_id = await get_or_create_user_topic(user, context)
         if topic_id:
             try:
-                # Forward msg to the specific topic
                 await context.bot.forward_message(
                     chat_id=SUPPORT_GROUP_ID,
                     from_chat_id=user.id,
@@ -420,7 +410,6 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    # Updated Filter: Text + Media
     app.add_handler(MessageHandler(
         (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.DOCUMENT) & ~filters.COMMAND, 
         handle_message_input
@@ -428,7 +417,7 @@ def main():
     
     app.add_handler(ChatMemberHandler(track_status, ChatMemberHandler.CHAT_MEMBER))
     
-    print("Bot Running with Support System...")
+    print("Bot Running...")
     app.run_polling()
 
 if __name__ == '__main__':
