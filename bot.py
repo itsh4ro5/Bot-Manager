@@ -19,6 +19,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, ChatM
 try:
     from flask import Flask
     def _start_keepalive():
+        # Render/Heroku provide PORT env var
         port = int(os.environ.get("PORT", "0") or "0")
         if port:
             app = Flask(__name__)
@@ -26,25 +27,30 @@ try:
             def _index(): return "Bot is Running!", 200
             @app.get("/health")
             def _health(): return "OK", 200
+            # Run Flask in a separate thread so it doesn't block the bot
             th = threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port, use_reloader=False), daemon=True)
             th.start()
-except Exception:
+            print(f"Flask Server started on port {port}")
+        else:
+            print("No PORT env var found, skipping Flask server.")
+except Exception as e:
+    print(f"Flask Error: {e}")
     def _start_keepalive(): pass
 _start_keepalive()
 
 # ==============================================================================
-# 👇👇👇 TERMUX / LOCAL CONFIGURATION (Sirf tab bharein jab Cloud use na karein)
+# 👇👇👇 TERMUX / LOCAL CONFIGURATION (Fallback if Env Vars are missing)
 # ==============================================================================
-LOCAL_BOT_TOKEN = "7947999475:AAG9_cCpaL0o_5qcrPGnjOp1wtL1r6KqvMQ"       # Token yahan daalein
-LOCAL_OWNER_ID = 8197649993         # Apna ID (Number)
-LOCAL_ADMIN_IDS = "7728794948"       # Comma se alag karke IDs (e.g. "123, 456")
-LOCAL_SUPPORT_GROUP = -1003629338139    # Support Group ID (-100...)
+LOCAL_BOT_TOKEN = "7947999475:AAG9_cCpaL0o_5qcrPGnjOp1wtL1r6KqvMQ"       # Token here
+LOCAL_OWNER_ID = 8197649993         # Owner ID
+LOCAL_ADMIN_IDS = "7728794948"       # Comma separated IDs
+LOCAL_SUPPORT_GROUP = -1003629338139    # Support Group ID
 # ==============================================================================
 
 # --- CONFIGURATION LOADING logic ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", LOCAL_BOT_TOKEN)
 if not TELEGRAM_BOT_TOKEN:
-    print("❌ ERROR: Bot Token missing! Env Var ya LOCAL_BOT_TOKEN check karein.")
+    print("❌ ERROR: Bot Token missing! Check Env Var or LOCAL_BOT_TOKEN.")
 
 OWNER_ID = int(os.environ.get("OWNER_ID", LOCAL_OWNER_ID or 0))
 
@@ -80,6 +86,7 @@ logger = logging.getLogger(__name__)
 # --- PERSISTENCE ---
 def save_data():
     try:
+        # Ensure directory exists if path is provided
         if "/" in DATA_FILE: os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
         data = {
             "ADMIN_IDS": ADMIN_IDS,
@@ -99,7 +106,10 @@ def load_data():
     try:
         with open(DATA_FILE, "r") as f:
             data = json.load(f)
-            ADMIN_IDS = data.get("ADMIN_IDS", ADMIN_IDS)
+            # We don't overwrite ADMIN_IDS entirely from file to allow Env Var override, 
+            # but you can adapt logic if needed. Here we trust Env/Local config primarily for Admins.
+            # ADMIN_IDS = data.get("ADMIN_IDS", ADMIN_IDS) 
+            
             FREE_CHANNELS = {int(k): v for k, v in data.get("FREE_CHANNELS", {}).items()}
             FREE_CHANNEL_LINKS = {int(k): v for k, v in data.get("FREE_CHANNEL_LINKS", {}).items()}
             
