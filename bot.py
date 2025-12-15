@@ -667,7 +667,7 @@ def main():
     
     # Updated Filter: Allows text/media from BOTH private chats AND groups (support group)
     app.add_handler(MessageHandler(
-        (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.DOCUMENT | filters.VOICE | filters.STICKER) & ~filters.COMMAND, 
+        (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.VOICE | filters.Sticker.ALL) & ~filters.COMMAND, 
         handle_message_input
     ))
     
