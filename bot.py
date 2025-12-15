@@ -35,10 +35,10 @@ _start_keepalive()
 # ==============================================================================
 # 👇👇👇 TERMUX / LOCAL CONFIGURATION (Sirf tab bharein jab Cloud use na karein)
 # ==============================================================================
-LOCAL_BOT_TOKEN = ""       # Token yahan daalein
-LOCAL_OWNER_ID = 0         # Apna ID (Number)
-LOCAL_ADMIN_IDS = ""       # Comma se alag karke IDs (e.g. "123, 456")
-LOCAL_SUPPORT_GROUP = 0    # Support Group ID (-100...)
+LOCAL_BOT_TOKEN = "7947999475:AAG9_cCpaL0o_5qcrPGnjOp1wtL1r6KqvMQ"       # Token yahan daalein
+LOCAL_OWNER_ID = 8197649993         # Apna ID (Number)
+LOCAL_ADMIN_IDS = "7728794948"       # Comma se alag karke IDs (e.g. "123, 456")
+LOCAL_SUPPORT_GROUP = -1003629338139    # Support Group ID (-100...)
 # ==============================================================================
 
 # --- CONFIGURATION LOADING logic ---
