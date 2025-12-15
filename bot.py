@@ -478,7 +478,32 @@ async def handle_message_input(update: Update, context: ContextTypes.DEFAULT_TYP
     chat = update.effective_chat
     if not user: return
 
-    # Restore Data
+    # --- 1. ADMIN REPLY (Topic -> Private Chat) ---
+    # Agar message Support Group me aaya hai aur Topic ID hai
+    if chat.id == SUPPORT_GROUP_ID and update.message.message_thread_id:
+        topic_id = update.message.message_thread_id
+        target_user_id = None
+        
+        # Topic ID se User ID dhoondho
+        for uid, tid in USER_TOPICS.items():
+            if tid == topic_id:
+                target_user_id = uid
+                break
+        
+        # Message Copy karo User ko
+        if target_user_id:
+            try:
+                await context.bot.copy_message(
+                    chat_id=target_user_id,
+                    from_chat_id=chat.id,
+                    message_id=update.message.id
+                )
+            except Exception as e:
+                # Agar user ne block kiya hai ya koi error hai
+                await update.message.reply_text(f"❌ Failed to send: {e}")
+        return
+
+    # --- 2. RESTORE DATA (Owner Only) ---
     if is_owner(user.id) and update.message.document:
         doc = update.message.document
         if update.message.caption and "restore" in update.message.caption.lower():
@@ -492,7 +517,7 @@ async def handle_message_input(update: Update, context: ContextTypes.DEFAULT_TYP
                     await update.message.reply_text(f"❌ Restore Failed: {e}")
             return
 
-    # ADMIN WIZARD
+    # --- 3. ADMIN WIZARD INPUTS ---
     if is_admin(user.id) and 'step' in context.user_data:
         step = context.user_data.pop('step')
         
@@ -593,7 +618,7 @@ async def handle_message_input(update: Update, context: ContextTypes.DEFAULT_TYP
 
         return
 
-    # 2. SUPPORT FORWARDING
+    # --- 4. SUPPORT FORWARDING (Private Chat -> Topic) ---
     if chat.type == ChatType.PRIVATE and SUPPORT_GROUP_ID:
         topic_id = await get_or_create_user_topic(user, context)
         if topic_id:
@@ -630,8 +655,9 @@ def main():
 
     app.add_handler(CallbackQueryHandler(button_handler))
     
+    # Updated Filter: Allows text/media from BOTH private chats AND groups (support group)
     app.add_handler(MessageHandler(
-        (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.DOCUMENT) & ~filters.COMMAND, 
+        (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.DOCUMENT | filters.VOICE | filters.STICKER) & ~filters.COMMAND, 
         handle_message_input
     ))
     
