@@ -24,7 +24,7 @@ from telegram.ext import (
     MessageReactionHandler
 )
 
-# --- KEEPALIVE WEB SERVER ---
+# --- KEEPALIVE WEB SERVER (Cloud Deployments ke liye) ---
 try:
     from flask import Flask
     def _start_keepalive():
@@ -42,33 +42,54 @@ except Exception:
     def _start_keepalive(): pass
 _start_keepalive()
 
-# --- CONFIGURATION ---
-# Fallback values for local testing
-LOCAL_BOT_TOKEN = "YOUR_BOT_TOKEN"
-LOCAL_OWNER_ID = 0
-LOCAL_MANDATORY_CHANNEL = -100123456789
+# ==============================================================================
+# 👇👇👇 TERMUX / LOCAL CONFIGURATION (Yahan apni IDs dalein agar Env Vars nahi hain)
+# ==============================================================================
+# Agar aap Termux use kar rahe hain, to bas yahan values edit karein:
 
+LOCAL_BOT_TOKEN = "7947999475:AAG9_cCpaL0o_5qcrPGnjOp1wtL1r6KqvMQ"  # Apna Token yahan dalein
+LOCAL_OWNER_ID = 8197649993          # Apna Owner ID yahan dalein
+LOCAL_ADMIN_IDS = "7728794948"       # Extra Admin IDs (comma separated)
+LOCAL_SUPPORT_GROUP_ID = -1003629338139  # Support Group ID (Topics wala)
+LOCAL_MANDATORY_CHANNEL_ID = 0       # Main Channel ID (jisko join karna zaroori hai)
+LOCAL_LOG_CHANNEL_ID = 0             # Logs ke liye channel ID
+
+# Links (Optional)
+LOCAL_MANDATORY_LINK = "https://t.me/YourChannel"
+LOCAL_CONTACT_LINK = "https://t.me/YourSupport"
+# ==============================================================================
+
+# --- CONFIGURATION LOADING (Prioritizes Env Vars, Falls back to Local) ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", LOCAL_BOT_TOKEN)
-OWNER_ID = int(os.environ.get("OWNER_ID", LOCAL_OWNER_ID))
-MANDATORY_CHANNEL_ID = int(os.environ.get("MANDATORY_CHANNEL_ID", LOCAL_MANDATORY_CHANNEL))
-MANDATORY_CHANNEL_LINK = os.environ.get("MANDATORY_CHANNEL_LINK", "https://t.me/...")
-SUPPORT_GROUP_ID = int(os.environ.get("SUPPORT_GROUP_ID", 0))
-CONTACT_ADMIN_LINK = os.environ.get("CONTACT_ADMIN_LINK", "https://t.me/...")
-LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", 0))
+OWNER_ID = int(os.environ.get("OWNER_ID", LOCAL_OWNER_ID or 0))
+
+# Load Admins
+env_admins = os.environ.get("ADMIN_IDS", "")
+local_admins = LOCAL_ADMIN_IDS
+final_admins_str = env_admins if env_admins else local_admins
+initial_admin_ids = [int(x.strip()) for x in final_admins_str.split(',') if x.strip()]
+if OWNER_ID and OWNER_ID not in initial_admin_ids:
+    initial_admin_ids.append(OWNER_ID)
+
+# Load Channels & Groups
+MANDATORY_CHANNEL_ID = int(os.environ.get("MANDATORY_CHANNEL_ID", LOCAL_MANDATORY_CHANNEL_ID or 0))
+MANDATORY_CHANNEL_LINK = os.environ.get("MANDATORY_CHANNEL_LINK", LOCAL_MANDATORY_LINK)
+SUPPORT_GROUP_ID = int(os.environ.get("SUPPORT_GROUP_ID", LOCAL_SUPPORT_GROUP_ID or 0))
+CONTACT_ADMIN_LINK = os.environ.get("CONTACT_ADMIN_LINK", LOCAL_CONTACT_LINK)
+LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", LOCAL_LOG_CHANNEL_ID or 0))
 DATA_FILE = os.environ.get("DATA_FILE", "bot_data.json")
 
 # --- GLOBAL DATA STRUCTURES ---
-# Saved in JSON
-ADMIN_IDS = []
-FREE_CHANNELS = {}  # {id: name}
-PAID_CHANNELS = {}  # {id: name}
-USER_DATA = {}      # {id: {name, username}}
+ADMIN_IDS = []       # Will be loaded from JSON + Initial
+FREE_CHANNELS = {}   # {id: name}
+PAID_CHANNELS = {}   # {id: name}
+USER_DATA = {}       # {id: {name, username}}
 BLOCKED_USER_IDS = set()
-USER_TOPICS = {}    # {user_id: topic_id}
-MESSAGE_MAP = {}    # {(chat_id, msg_id): (target_chat_id, target_msg_id)} - For sync
+USER_TOPICS = {}     # {user_id: topic_id}
+MESSAGE_MAP = {}     # {(chat_id, msg_id): (target_chat_id, target_msg_id)} - For sync
 
 # Runtime only (not saved)
-DEMO_PENDING = {}   # {user_id: batch_id} - Tracks who requested a demo link
+DEMO_PENDING = {}   # {user_id: batch_id}
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -77,14 +98,12 @@ logger = logging.getLogger(__name__)
 def save_data():
     try:
         if "/" in DATA_FILE: os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-        # Convert keys to strings for JSON, sets to lists
         data = {
             "ADMIN_IDS": ADMIN_IDS,
             "FREE_CHANNELS": {str(k): v for k, v in FREE_CHANNELS.items()},
             "PAID_CHANNELS": {str(k): v for k, v in PAID_CHANNELS.items()},
             "BLOCKED_USER_IDS": list(BLOCKED_USER_IDS),
             "USER_TOPICS": {str(k): v for k, v in USER_TOPICS.items()},
-            # We don't save MESSAGE_MAP to keep JSON small, but for production use a DB
             "USER_DATA": USER_DATA
         }
         with open(DATA_FILE, "w") as f: json.dump(data, f, indent=4)
@@ -96,14 +115,10 @@ def load_data():
         with open(DATA_FILE, "r") as f:
             data = json.load(f)
             
-            # Load Admins: Merge Env Admins with JSON Admins
+            # JSON Admins
             json_admins = data.get("ADMIN_IDS", [])
-            env_admins_str = os.environ.get("ADMIN_IDS", "")
-            env_admins = [int(x.strip()) for x in env_admins_str.split(',') if x.strip()]
-            
-            # Combine unique IDs
-            combined = set(json_admins + env_admins)
-            if OWNER_ID: combined.add(OWNER_ID)
+            # Combine Env/Local Admins with JSON Admins
+            combined = set(json_admins + initial_admin_ids)
             ADMIN_IDS = list(combined)
 
             FREE_CHANNELS = {int(k): v for k, v in data.get("FREE_CHANNELS", {}).items()}
@@ -113,7 +128,7 @@ def load_data():
             USER_DATA = {int(k): v for k, v in data.get("USER_DATA", {}).items()}
             
     except FileNotFoundError:
-        ADMIN_IDS = [OWNER_ID] if OWNER_ID else []
+        ADMIN_IDS = initial_admin_ids
         save_data()
 
 # --- HELPER FUNCTIONS ---
@@ -121,9 +136,13 @@ def is_owner(uid): return uid == OWNER_ID
 def is_admin(uid): return uid in ADMIN_IDS
 
 async def get_or_create_user_topic(user, context):
-    if not SUPPORT_GROUP_ID: return None
+    """Creates a forum topic in the Support Group for the user."""
+    if not SUPPORT_GROUP_ID: 
+        print("❌ Support Group ID not set!")
+        return None
+    
     if user.id in USER_TOPICS: 
-        # Verify if topic still exists (optional, keeping simple)
+        # Check if topic is accessible (simplified: just return ID)
         return USER_TOPICS[user.id]
     
     try:
@@ -135,7 +154,7 @@ async def get_or_create_user_topic(user, context):
         await context.bot.send_message(
             chat_id=SUPPORT_GROUP_ID, 
             message_thread_id=topic.message_thread_id,
-            text=f"🆕 **New Session**\nUser: {user.full_name}\nID: `{user.id}`\n@{user.username}",
+            text=f"🆕 **New Session Started**\nUser: {user.full_name}\nID: `{user.id}`\nUsername: @{user.username or 'None'}",
             parse_mode=ParseMode.MARKDOWN
         )
         return topic.message_thread_id
@@ -156,10 +175,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user or user.id in BLOCKED_USER_IDS: return
 
-    USER_DATA[user.id] = {'full_name': user.full_name, 'username': user.username}
-    # Don't save on every start to reduce IO, rely on periodic or event based saves
+    # Save user info
+    USER_DATA[str(user.id)] = {'full_name': user.full_name, 'username': user.username}
+    # Optional: save_data() here if you want real-time user persistence (heavy IO)
     
-    # Send user info to support if new session needed
+    # Init support topic if needed
     if SUPPORT_GROUP_ID and user.id not in USER_TOPICS:
         await get_or_create_user_topic(user, context)
 
@@ -176,8 +196,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await is_member(user.id, context):
             kb = [
                 [InlineKeyboardButton("🆓 Free Batches", callback_data='show_free'), InlineKeyboardButton("💎 Paid Batches", callback_data='show_paid')],
-                [InlineKeyboardButton("📂 My Batches", callback_data='my_batches'), InlineKeyboardButton("📞 Support", url=CONTACT_ADMIN_LINK)],
-                [InlineKeyboardButton("📢 Channel", url=MANDATORY_CHANNEL_LINK)]
+                [InlineKeyboardButton("📂 My Batches", callback_data='my_batches'), InlineKeyboardButton("📞 Support", url=CONTACT_ADMIN_LINK or "https://t.me/telegram")],
+                [InlineKeyboardButton("📢 Channel", url=MANDATORY_CHANNEL_LINK or "https://t.me/telegram")]
             ]
             await update.message.reply_text(
                 f"👋 **Welcome {user.first_name}!**\nSelect an option below to continue.", 
@@ -185,7 +205,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.MARKDOWN
             )
         else:
-            kb = [[InlineKeyboardButton("➡️ Join Channel", url=MANDATORY_CHANNEL_LINK)], 
+            kb = [[InlineKeyboardButton("➡️ Join Channel", url=MANDATORY_CHANNEL_LINK or "#")], 
                   [InlineKeyboardButton("✅ I joined", callback_data='verify')]]
             await update.message.reply_text("⚠️ **Action Required**\nPlease join our mandatory channel to use this bot.", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
 
@@ -303,7 +323,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Link Generated!")
             await context.bot.send_message(uid, f"🔗 **Your Unique Link:**\n{link_obj.invite_link}\n\n(Expires after 1 use)", parse_mode=ParseMode.MARKDOWN)
         except Exception as e:
-            await q.answer("Error generating link. Bot might not be admin.", show_alert=True)
+            await q.answer("Error. Bot must be Admin.", show_alert=True)
             logger.error(f"Link Gen Error: {e}")
 
     # Paid Batch Selection
@@ -381,7 +401,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
     
     elif data.startswith('delbatch_'):
-        # delbatch_f_123
         parts = data.split('_')
         b_type, cid = parts[1], int(parts[2])
         if b_type == 'f' and cid in FREE_CHANNELS:
@@ -473,12 +492,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if topic_id:
             try:
                 fwd = await context.bot.forward_message(SUPPORT_GROUP_ID, user.id, update.message.id, message_thread_id=topic_id)
-                # Sync: Map (TopicID, FwdMsgID) -> (UserID, OrigMsgID)
-                # But for deletion sync, we usually need to delete the User's message? 
-                # Telegram Bots CANNOT delete user messages in private chats.
-                # Requirement: "If Admin deletes... corresponding message in User's chat must be deleted."
-                # This only works for messages SENT BY THE BOT. 
-                # So we can only sync deletion of ADMIN REPLIES.
+                # No sync logic needed here as Fwd is handled by Telegram
                 pass
             except Exception as e: logger.error(f"Fwd error: {e}")
 
@@ -501,7 +515,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(f"❌ Could not delete: {e}")
             return
 
-        # Normal Reply
+        # Normal Reply (Copy Message)
         target_uid = None
         for uid, tid in USER_TOPICS.items():
             if tid == topic_id: target_uid = uid; break
@@ -510,7 +524,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 sent_msg = await context.bot.copy_message(target_uid, chat.id, update.message.id)
                 # Store mapping for Deletion Sync and Reaction Sync
-                # Map (TopicMsgID) -> (UserChatID, UserMsgID)
                 MESSAGE_MAP[(chat.id, update.message.id)] = (target_uid, sent_msg.message_id)
                 # Reverse map for Reaction Sync (User reacts to sent_msg -> Show on TopicMsg)
                 MESSAGE_MAP[(target_uid, sent_msg.message_id)] = (chat.id, update.message.id)
@@ -542,7 +555,9 @@ async def demo_expired(context: ContextTypes.DEFAULT_TYPE):
     
     # Notify Admin
     if LOG_CHANNEL_ID:
-        await context.bot.send_message(LOG_CHANNEL_ID, f"⏰ **Demo Expired**\nUser: {user_id}\nChat: {chat_id}\n\nPlease kick them manually or use /ban.")
+        try:
+            await context.bot.send_message(LOG_CHANNEL_ID, f"⏰ **Demo Expired**\nUser: {user_id}\nChat: {chat_id}\n\nPlease kick them manually or use /ban.")
+        except: pass
     
     # Notify User
     try:
@@ -558,9 +573,9 @@ async def demo_expired(context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles Pending Join Requests"""
-    req = update.chat_join_request
-    # We could auto-approve here if we wanted to fully automate
-    # But for now we just log or let admins click 'Approve' in Telegram
+    # req = update.chat_join_request
+    # For now, we rely on admins to approve requests in the Telegram UI
+    # We could add auto-approve logic here if needed
     pass
 
 async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -580,7 +595,10 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.ban_chat_member(cid, user.id)
                     await context.bot.unban_chat_member(cid, user.id)
                 except: pass
-            if LOG_CHANNEL_ID: await context.bot.send_message(LOG_CHANNEL_ID, f"🚫 **Auto-Kick**: {user.full_name} left mandatory channel.")
+            if LOG_CHANNEL_ID: 
+                try:
+                    await context.bot.send_message(LOG_CHANNEL_ID, f"🚫 **Auto-Kick**: {user.full_name} left mandatory channel.")
+                except: pass
     
     # 2. Paid Batch Entry (Demo Check)
     if res.new_chat_member.status == ChatMember.MEMBER:
@@ -634,8 +652,10 @@ def main():
     # Message Handler (Must be last)
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
     
-    print("Bot Upgraded & Running...")
+    print("Bot Upgraded & Running on Termux/Cloud...")
     app.run_polling()
 
 if __name__ == '__main__':
     main()
+
+
