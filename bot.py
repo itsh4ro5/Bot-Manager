@@ -620,10 +620,10 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- MAIN SETUP ---
 
-def post_init(app: Application):
+async def post_init(app: Application):
     """Sets commands"""
     # Standard User Commands
-    app.bot.set_my_commands([
+    await app.bot.set_my_commands([
         ("start", "Main Menu"),
         ("batch", "My Batches"),
         ("help", "Help")
