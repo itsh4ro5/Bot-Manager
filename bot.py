@@ -107,7 +107,11 @@ mongo_collection = None
 if MONGO_URL:
     try:
         from pymongo import MongoClient
-        mongo_client = MongoClient(MONGO_URL)
+        import certifi
+        
+        # FIX: tlsCAFile=certifi.where() is added to solve SSL Handshake Error
+        mongo_client = MongoClient(MONGO_URL, tlsCAFile=certifi.where())
+        
         mongo_db = mongo_client.get_database("telegram_bot_db")
         mongo_collection = mongo_db.get_collection("bot_settings")
         logger.info("✅ Connected to MongoDB Atlas")
