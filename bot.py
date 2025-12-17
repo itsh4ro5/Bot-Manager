@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 """
-ULTIMATE BOT MANAGER (v9.0 - The Mammoth Edition)
+ULTIMATE BOT MANAGER (v9.1 - Persistence Update)
 Features Included:
 1.  Owner Commands: /addadmin, /deladmin, /backup, /allusers
 2.  Admin Commands: /stats, /user, /addbatch, /delbatch, /broadcast, /post, /cancel
@@ -13,6 +13,8 @@ Features Included:
     - History Search Link in Tickets
     - Admin Command Auto-Deletion (20 mins)
     - Bidirectional Message Edit & Reaction Sync
+5.  Persistence:
+    - MongoDB Support (for Heroku/Render) to prevent data loss on restart.
 """
 
 import logging
@@ -49,7 +51,7 @@ try:
         port = int(os.environ.get("PORT", "8080"))
         app = Flask(__name__)
         @app.route('/')
-        def index(): return "Bot Running - v9.0 Mammoth Edition", 200
+        def index(): return "Bot Running - v9.1 Persistence Update", 200
         
         def run():
             app.run(host="0.0.0.0", port=port, use_reloader=False)
@@ -74,6 +76,7 @@ OWNER_ID = int(os.environ.get("OWNER_ID", DEFAULTS["OWNER"]))
 SUPPORT_GROUP_ID = int(os.environ.get("SUPPORT_GROUP_ID", DEFAULTS["SUPPORT"]))
 MANDATORY_CHANNEL_ID = int(os.environ.get("MANDATORY_CHANNEL_ID", DEFAULTS["MAIN_CH"]))
 LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", DEFAULTS["LOG_CH"]))
+MONGO_URL = os.environ.get("MONGO_URL", None) # New: Mongo Connection String
 
 MANDATORY_CHANNEL_LINK = os.environ.get("MANDATORY_CHANNEL_LINK", "https://t.me/YourChannel")
 DATA_FILE = os.environ.get("DATA_FILE", "bot_data.json")
@@ -97,9 +100,48 @@ TOPIC_CREATION_LOCK = set()
 
 data_lock = asyncio.Lock()
 
+# MongoDB Setup
+mongo_client = None
+mongo_collection = None
+
+if MONGO_URL:
+    try:
+        from pymongo import MongoClient
+        mongo_client = MongoClient(MONGO_URL)
+        mongo_db = mongo_client.get_database("telegram_bot_db")
+        mongo_collection = mongo_db.get_collection("bot_settings")
+        logger.info("✅ Connected to MongoDB Atlas")
+    except Exception as e:
+        logger.error(f"❌ MongoDB Connection Failed: {e}")
+        MONGO_URL = None # Fallback to local file
+
 # --- 5. PERSISTENCE FUNCTIONS ---
 def load_data():
     global DB
+    
+    # Try loading from MongoDB first if available
+    if MONGO_URL and mongo_collection is not None:
+        try:
+            data = mongo_collection.find_one({"_id": "main_settings"})
+            if data and "data" in data:
+                loaded = data["data"]
+                # Convert string keys back to integers for specific dicts
+                for k in ["FREE_CHANNELS", "PAID_CHANNELS", "USER_TOPICS", "USER_DATA", "PENDING_REQUESTS"]:
+                    if k in loaded:
+                        DB[k] = {int(i): v for i, v in loaded[k].items()}
+                
+                if "ADMIN_IDS" in loaded: DB["ADMIN_IDS"] = loaded["ADMIN_IDS"]
+                if "BLOCKED_USERS" in loaded: DB["BLOCKED_USERS"] = loaded["BLOCKED_USERS"]
+                
+                # Ensure Owner is always Admin
+                if OWNER_ID not in DB["ADMIN_IDS"]: DB["ADMIN_IDS"].append(OWNER_ID)
+                logger.info("✅ Database loaded from MongoDB.")
+                return
+        except Exception as e:
+            logger.error(f"MongoDB Load Error: {e}")
+            # If Mongo fails, proceed to try local file as backup
+
+    # Fallback to Local JSON
     if not os.path.exists(DATA_FILE):
         save_data_sync()
         return
@@ -107,23 +149,20 @@ def load_data():
     try:
         with open(DATA_FILE, "r") as f:
             loaded = json.load(f)
-            # Safe Merge to prevent errors
             if "ADMIN_IDS" in loaded: DB["ADMIN_IDS"] = loaded["ADMIN_IDS"]
             if "BLOCKED_USERS" in loaded: DB["BLOCKED_USERS"] = loaded["BLOCKED_USERS"]
-            
-            # Convert string keys back to integers
             for k in ["FREE_CHANNELS", "PAID_CHANNELS", "USER_TOPICS", "USER_DATA", "PENDING_REQUESTS"]:
                 if k in loaded:
                     DB[k] = {int(i): v for i, v in loaded[k].items()}
 
-            # Ensure Owner is always Admin
             if OWNER_ID not in DB["ADMIN_IDS"]: DB["ADMIN_IDS"].append(OWNER_ID)
-            logger.info("Database loaded successfully.")
+            logger.info("Database loaded from Local File.")
     except Exception as e:
-        logger.error(f"Load Error: {e}")
+        logger.error(f"Local Load Error: {e}")
 
 def save_data_sync():
     try:
+        # Prepare data for saving (convert int keys to strings for JSON/Mongo compatibility)
         to_save = {
             "ADMIN_IDS": DB["ADMIN_IDS"],
             "BLOCKED_USERS": DB["BLOCKED_USERS"],
@@ -133,8 +172,22 @@ def save_data_sync():
             "USER_TOPICS": {str(k): v for k, v in DB["USER_TOPICS"].items()},
             "PENDING_REQUESTS": {str(k): v for k, v in DB["PENDING_REQUESTS"].items()}
         }
+
+        # Save to MongoDB if available
+        if MONGO_URL and mongo_collection is not None:
+            try:
+                mongo_collection.replace_one(
+                    {"_id": "main_settings"},
+                    {"_id": "main_settings", "data": to_save},
+                    upsert=True
+                )
+            except Exception as e:
+                logger.error(f"MongoDB Save Error: {e}")
+        
+        # Always save to local file as backup/cache
         with open(DATA_FILE, "w") as f:
             json.dump(to_save, f, indent=4)
+            
     except Exception as e:
         logger.error(f"Save Error: {e}")
 
@@ -221,20 +274,40 @@ async def get_or_create_topic(user, context):
 
 # --- 7. COMMAND HANDLERS ---
 
-# /id command
+# /id command - FIXED for Channels/Groups
 async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
     msg_obj = update.effective_message
     
+    text = ""
+    # 1. Private Chat
     if chat.type == ChatType.PRIVATE:
-        text = f"👤 **Your User ID:** `{user.id}`"
+        if user:
+            text = f"👤 **Your User ID:** `{user.id}`"
+        else:
+            text = f"🆔 **Chat ID:** `{chat.id}`"
+    # 2. Group or Channel
     else:
         text = f"🆔 **Chat ID:** `{chat.id}`"
-        
-    sent_msg = await msg_obj.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        # If it's a topic, add thread ID
+        if msg_obj and msg_obj.is_topic_message and msg_obj.message_thread_id:
+            text += f"\n🧵 **Topic ID:** `{msg_obj.message_thread_id}`"
+        # If user triggered it in group
+        if user:
+            text += f"\n👤 **User ID:** `{user.id}`"
+            
+    try:
+        sent_msg = await msg_obj.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        # Fallback if reply fails (e.g. Channel post)
+        try:
+            sent_msg = await context.bot.send_message(chat.id, text, parse_mode=ParseMode.MARKDOWN)
+        except Exception as e:
+            logger.error(f"Could not send /id: {e}")
+            return
     
-    # Auto-clean if admin
+    # Auto-clean if admin (and if user object exists)
     if user and is_admin(user.id):
         await schedule_delete(context, msg_obj)
         await schedule_delete(context, sent_msg)
@@ -274,10 +347,14 @@ async def cmd_del_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /backup (Owner Only)
 async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID: return
+    
+    # Force save first
+    save_data_sync()
+    
     if os.path.exists(DATA_FILE):
-        await update.message.reply_document(document=open(DATA_FILE, "rb"), caption="DB Backup")
+        await update.message.reply_document(document=open(DATA_FILE, "rb"), caption="DB Backup (JSON)")
     else:
-        msg = await update.message.reply_text("No DB file found.")
+        msg = await update.message.reply_text("No DB file found locally.")
         await schedule_delete(context, msg)
     await schedule_delete(context, update.message)
 
@@ -346,12 +423,22 @@ async def cmd_user_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /stats (Admin)
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
+    
+    # Calculate basic stats
+    total_users = len(DB['USER_DATA'])
+    free_batches = len(DB['FREE_CHANNELS'])
+    paid_batches = len(DB['PAID_CHANNELS'])
+    blocked = len(DB['BLOCKED_USERS'])
+    
+    mode = "MongoDB Cloud ☁️" if MONGO_URL else "Local File 📁 (Not Persistent on Heroku)"
+
     t = (
         f"📊 **Statistics**\n"
-        f"👥 Users: {len(DB['USER_DATA'])}\n"
-        f"🆓 Free Batches: {len(DB['FREE_CHANNELS'])}\n"
-        f"💎 Paid Batches: {len(DB['PAID_CHANNELS'])}\n"
-        f"🚫 Blocked: {len(DB['BLOCKED_USERS'])}"
+        f"💾 **Storage:** {mode}\n"
+        f"👥 Users: {total_users}\n"
+        f"🆓 Free Batches: {free_batches}\n"
+        f"💎 Paid Batches: {paid_batches}\n"
+        f"🚫 Blocked: {blocked}"
     )
     msg = await update.message.reply_text(t, parse_mode=ParseMode.MARKDOWN)
     await schedule_delete(context, update.message)
@@ -410,6 +497,7 @@ async def wizard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def wizard_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    if not user: return False # Safety check
     uid = user.id
     txt = update.message.text
     if uid not in ADMIN_WIZARD: return False
@@ -459,6 +547,7 @@ async def cmd_post_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_broadcast_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    if not user: return False
     if user.id not in BROADCAST_STATE: return False
     
     state = BROADCAST_STATE[user.id]
@@ -551,6 +640,10 @@ async def main_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.effective_user
     chat = update.effective_chat
     
+    # Handle Channel Posts (which have no user usually)
+    if not user:
+        return 
+
     # Check Active States first
     if await wizard_message(update, context): return
     if await handle_broadcast_flow(update, context): return
@@ -786,13 +879,14 @@ def main():
     app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_edit))
     
     # 5. Main Message Loop (Must be last)
+    # Allows commands in channels if configured right, or fallback logic
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, main_message_handler))
     
     # 6. Job Queue
     if app.job_queue: 
         app.job_queue.run_repeating(check_demos, interval=60, first=10)
     
-    print("Bot v9.0 Mammoth Edition Started...")
+    print("Bot v9.1 Persistence Edition Started...")
     app.run_polling()
 
 if __name__ == "__main__":
