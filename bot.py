@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 """
-ULTIMATE BOT MANAGER (v9.1 - Persistence Update)
+ULTIMATE BOT MANAGER (v9.2 - Interface Update)
 Features Included:
 1.  Owner Commands: /addadmin, /deladmin, /backup, /allusers
 2.  Admin Commands: /stats, /user, /addbatch, /delbatch, /broadcast, /post, /cancel
@@ -15,6 +15,8 @@ Features Included:
     - Bidirectional Message Edit & Reaction Sync
 5.  Persistence:
     - MongoDB Support (for Heroku/Render) to prevent data loss on restart.
+6.  New Interfaces:
+    - Separate Welcome Messages for Owner, Admin, and Users.
 """
 
 import logging
@@ -51,7 +53,7 @@ try:
         port = int(os.environ.get("PORT", "8080"))
         app = Flask(__name__)
         @app.route('/')
-        def index(): return "Bot Running - v9.1 Persistence Update", 200
+        def index(): return "Bot Running - v9.2 Interface Update", 200
         
         def run():
             app.run(host="0.0.0.0", port=port, use_reloader=False)
@@ -297,13 +299,18 @@ async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # If it's a topic, add thread ID
         if msg_obj and msg_obj.is_topic_message and msg_obj.message_thread_id:
             text += f"\n🧵 **Topic ID:** `{msg_obj.message_thread_id}`"
-        # If user triggered it in group
+        # If user triggered it in group (Channels dont have 'user' in updates often)
         if user:
             text += f"\n👤 **User ID:** `{user.id}`"
             
     try:
-        sent_msg = await msg_obj.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-    except Exception:
+        # Check if we can reply
+        if msg_obj:
+            sent_msg = await msg_obj.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        else:
+            # Fallback for channel posts without typical message structure
+            sent_msg = await context.bot.send_message(chat.id, text, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
         # Fallback if reply fails (e.g. Channel post)
         try:
             sent_msg = await context.bot.send_message(chat.id, text, parse_mode=ParseMode.MARKDOWN)
@@ -830,7 +837,7 @@ async def show_user_menu(update: Update):
     else:
         await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
 
-# --- 14. STARTUP ---
+# --- 14. STARTUP & WELCOME MESSAGES ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -841,9 +848,50 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         DB["USER_DATA"][user.id] = {"name": user.full_name, "username": user.username, "joined_at": time.time(), "demos": {}}
         await save_data_async()
     
-    # Ensure Topic Exists
+    # Ensure Topic Exists for everyone (so admins can see it if needed)
     await get_or_create_topic(user, context)
     
+    # 1. OWNER VIEW (Full Access)
+    if user.id == OWNER_ID:
+        txt = (
+            f"👑 **WELCOME BOSS!**\n"
+            f"You have full system access.\n\n"
+            f"**⚙️ Owner Commands:**\n"
+            f"`/addadmin [id]` - Add new admin\n"
+            f"`/deladmin [id]` - Remove admin\n"
+            f"`/backup` - Download data backup\n"
+            f"`/allusers` - Get list of all users\n\n"
+            f"**🛠 Admin Tools:**\n"
+            f"`/stats` - View Bot Statistics\n"
+            f"`/addbatch` - Create New Batch\n"
+            f"`/delbatch` - Delete Batch\n"
+            f"`/broadcast` - Send Msg to All Users\n"
+            f"`/post` - Post to All Channels\n"
+            f"`/user [id]` - Check User Info\n"
+            f"`/cancel` - Stop Current Action"
+        )
+        await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # 2. ADMIN VIEW (Restricted Tools)
+    if is_admin(user.id):
+        txt = (
+            f"👮‍♂️ **WELCOME ADMIN!**\n"
+            f"Here are your management tools.\n\n"
+            f"**🛠 Available Commands:**\n"
+            f"`/stats` - View Bot Statistics\n"
+            f"`/addbatch` - Create New Batch\n"
+            f"`/delbatch` - Delete Batch\n"
+            f"`/broadcast` - Send Msg to All Users\n"
+            f"`/post` - Post to All Channels\n"
+            f"`/user [id]` - Check User Info\n"
+            f"`/cancel` - Stop Current Action\n\n"
+            f"⚠️ *Note: You cannot add/remove other admins.*"
+        )
+        await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # 3. USER VIEW (Standard Menu)
     if await check_membership(user.id, context):
         await show_user_menu(update)
     else: 
@@ -890,7 +938,7 @@ def main():
     if app.job_queue: 
         app.job_queue.run_repeating(check_demos, interval=60, first=10)
     
-    print("Bot v9.1 Persistence Edition Started...")
+    print("Bot v9.2 Interface Edition Started...")
     app.run_polling()
 
 if __name__ == "__main__":
