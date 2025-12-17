@@ -1,661 +1,700 @@
 # -*- coding: utf-8 -*-
 
 """
-ALL-IN-ONE TELEGRAM BOT (UPGRADED)
-Features: Support System (Topics), Store (Free/Paid), Broadcast, Auto-Kick, Data Backup, 
-          Smart Links (One-Time/Demo), Reaction Sync, Dynamic Admins.
+ADVANCED TELEGRAM BOT MANAGER (Final v3.0)
+- Full Command Based Admin Panel (No Buttons for Admin)
+- TXT Report Generation
+- Message Editing & Reaction Sync
+- Broadcast Confirmation
+- Restart Proof Demo Timers
+- Smart History Search Link (For Old Topics)
 """
 
 import logging
 import json
 import os
-import threading
+import io
 import asyncio
-from datetime import timedelta
+import time
+import threading
+from datetime import datetime
 from telegram import (
     Update, ChatMember, InlineKeyboardButton, InlineKeyboardMarkup, 
-    BotCommandScopeChat, ChatJoinRequest, ChatPermissions
+    BotCommandScopeChat, ChatJoinRequest
 )
 from telegram.constants import ChatType, ParseMode
-from telegram.error import TelegramError, BadRequest
+from telegram.error import TelegramError, BadRequest, Forbidden
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes, ChatMemberHandler, 
     CallbackQueryHandler, MessageHandler, filters, Application, ChatJoinRequestHandler,
     MessageReactionHandler
 )
 
-# --- KEEPALIVE WEB SERVER (Cloud Deployments ke liye) ---
+# --- LOGGING SETUP ---
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# --- FLASK KEEPALIVE (For Render/Heroku) ---
 try:
     from flask import Flask
     def _start_keepalive():
-        port = int(os.environ.get("PORT", "0") or "0")
-        if port:
-            app = Flask(__name__)
-            @app.get("/")
-            def _index(): return "Bot is Running!", 200
-            @app.get("/health")
-            def _health(): return "OK", 200
-            th = threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port, use_reloader=False), daemon=True)
-            th.start()
-            print(f"Flask Server started on port {port}")
-except Exception:
+        port = int(os.environ.get("PORT", "8080"))
+        app = Flask(__name__)
+        @app.route('/')
+        def index(): return "Bot Running Securely (Final Version)", 200
+        
+        def run():
+            app.run(host="0.0.0.0", port=port, use_reloader=False)
+        
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+except ImportError:
     def _start_keepalive(): pass
 _start_keepalive()
 
-# ==============================================================================
-# 👇👇👇 TERMUX / LOCAL CONFIGURATION (Yahan apni IDs dalein agar Env Vars nahi hain)
-# ==============================================================================
-# Agar aap Termux use kar rahe hain, to bas yahan values edit karein:
+# --- CONFIGURATION ---
+# Replace these default values locally or set ENV Variables
+DEFAULTS = {
+    "TOKEN": "", 
+    "OWNER": 0,
+    "SUPPORT": 0, # Support Group ID
+    "MAIN_CH": 0, # Mandatory Channel ID
+    "LOG_CH": 0
+}
 
-LOCAL_BOT_TOKEN = "7947999475:AAG9_cCpaL0o_5qcrPGnjOp1wtL1r6KqvMQ"  # Apna Token yahan dalein
-LOCAL_OWNER_ID = 8197649993          # Apna Owner ID yahan dalein
-LOCAL_ADMIN_IDS = "7728794948"       # Extra Admin IDs (comma separated)
-LOCAL_SUPPORT_GROUP_ID = -1003629338139  # Support Group ID (Topics wala)
-LOCAL_MANDATORY_CHANNEL_ID = 0       # Main Channel ID (jisko join karna zaroori hai)
-LOCAL_LOG_CHANNEL_ID = 0             # Logs ke liye channel ID
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", DEFAULTS["TOKEN"])
+OWNER_ID = int(os.environ.get("OWNER_ID", DEFAULTS["OWNER"]))
+SUPPORT_GROUP_ID = int(os.environ.get("SUPPORT_GROUP_ID", DEFAULTS["SUPPORT"]))
+MANDATORY_CHANNEL_ID = int(os.environ.get("MANDATORY_CHANNEL_ID", DEFAULTS["MAIN_CH"]))
+LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", DEFAULTS["LOG_CH"]))
 
-# Links (Optional)
-LOCAL_MANDATORY_LINK = "https://t.me/YourChannel"
-LOCAL_CONTACT_LINK = "https://t.me/YourSupport"
-# ==============================================================================
-
-# --- CONFIGURATION LOADING (Prioritizes Env Vars, Falls back to Local) ---
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", LOCAL_BOT_TOKEN)
-OWNER_ID = int(os.environ.get("OWNER_ID", LOCAL_OWNER_ID or 0))
-
-# Load Admins
-env_admins = os.environ.get("ADMIN_IDS", "")
-local_admins = LOCAL_ADMIN_IDS
-final_admins_str = env_admins if env_admins else local_admins
-initial_admin_ids = [int(x.strip()) for x in final_admins_str.split(',') if x.strip()]
-if OWNER_ID and OWNER_ID not in initial_admin_ids:
-    initial_admin_ids.append(OWNER_ID)
-
-# Load Channels & Groups
-MANDATORY_CHANNEL_ID = int(os.environ.get("MANDATORY_CHANNEL_ID", LOCAL_MANDATORY_CHANNEL_ID or 0))
-MANDATORY_CHANNEL_LINK = os.environ.get("MANDATORY_CHANNEL_LINK", LOCAL_MANDATORY_LINK)
-SUPPORT_GROUP_ID = int(os.environ.get("SUPPORT_GROUP_ID", LOCAL_SUPPORT_GROUP_ID or 0))
-CONTACT_ADMIN_LINK = os.environ.get("CONTACT_ADMIN_LINK", LOCAL_CONTACT_LINK)
-LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", LOCAL_LOG_CHANNEL_ID or 0))
+MANDATORY_CHANNEL_LINK = os.environ.get("MANDATORY_CHANNEL_LINK", "https://t.me/YourChannel")
 DATA_FILE = os.environ.get("DATA_FILE", "bot_data.json")
 
-# --- GLOBAL DATA STRUCTURES ---
-ADMIN_IDS = []       # Will be loaded from JSON + Initial
-FREE_CHANNELS = {}   # {id: name}
-PAID_CHANNELS = {}   # {id: name}
-USER_DATA = {}       # {id: {name, username}}
-BLOCKED_USER_IDS = set()
-USER_TOPICS = {}     # {user_id: topic_id}
-MESSAGE_MAP = {}     # {(chat_id, msg_id): (target_chat_id, target_msg_id)} - For sync
+# --- DATA STORE ---
+DB = {
+    "ADMIN_IDS": [],
+    "FREE_CHANNELS": {},
+    "PAID_CHANNELS": {},
+    "USER_DATA": {},
+    "BLOCKED_USERS": [],
+    "USER_TOPICS": {}
+}
 
-# Runtime only (not saved)
-DEMO_PENDING = {}   # {user_id: batch_id}
+# Runtime Memory (Temporary)
+MESSAGE_MAP = {} # {(chat_id, msg_id): (target_chat_id, target_msg_id)}
+PENDING_DEMO_REQUESTS = {} 
+BROADCAST_STATE = {} # {admin_id: {type: 'broadcast/post', content: message_object}}
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
+data_lock = asyncio.Lock()
 
-# --- PERSISTENCE ---
-def save_data():
-    try:
-        if "/" in DATA_FILE: os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-        data = {
-            "ADMIN_IDS": ADMIN_IDS,
-            "FREE_CHANNELS": {str(k): v for k, v in FREE_CHANNELS.items()},
-            "PAID_CHANNELS": {str(k): v for k, v in PAID_CHANNELS.items()},
-            "BLOCKED_USER_IDS": list(BLOCKED_USER_IDS),
-            "USER_TOPICS": {str(k): v for k, v in USER_TOPICS.items()},
-            "USER_DATA": USER_DATA
-        }
-        with open(DATA_FILE, "w") as f: json.dump(data, f, indent=4)
-    except Exception as e: logger.error(f"Save Error: {e}")
-
+# --- PERSISTENCE (Saving Data) ---
 def load_data():
-    global ADMIN_IDS, FREE_CHANNELS, PAID_CHANNELS, BLOCKED_USER_IDS, USER_TOPICS, USER_DATA
+    global DB
+    if not os.path.exists(DATA_FILE):
+        save_data_sync()
+        return
+
     try:
         with open(DATA_FILE, "r") as f:
-            data = json.load(f)
+            loaded = json.load(f)
+            # Restore structure and convert keys back to int
+            if "ADMIN_IDS" in loaded: DB["ADMIN_IDS"] = loaded["ADMIN_IDS"]
+            if "BLOCKED_USERS" in loaded: DB["BLOCKED_USERS"] = loaded["BLOCKED_USERS"]
             
-            # JSON Admins
-            json_admins = data.get("ADMIN_IDS", [])
-            # Combine Env/Local Admins with JSON Admins
-            combined = set(json_admins + initial_admin_ids)
-            ADMIN_IDS = list(combined)
+            for k in ["FREE_CHANNELS", "PAID_CHANNELS", "USER_TOPICS", "USER_DATA"]:
+                if k in loaded:
+                    DB[k] = {int(i): v for i, v in loaded[k].items()}
 
-            FREE_CHANNELS = {int(k): v for k, v in data.get("FREE_CHANNELS", {}).items()}
-            PAID_CHANNELS = {int(k): v for k, v in data.get("PAID_CHANNELS", {}).items()}
-            BLOCKED_USER_IDS = set(data.get("BLOCKED_USER_IDS", []))
-            USER_TOPICS = {int(k): v for k, v in data.get("USER_TOPICS", {}).items()}
-            USER_DATA = {int(k): v for k, v in data.get("USER_DATA", {}).items()}
-            
-    except FileNotFoundError:
-        ADMIN_IDS = initial_admin_ids
-        save_data()
+            if OWNER_ID not in DB["ADMIN_IDS"]: DB["ADMIN_IDS"].append(OWNER_ID)
+    except Exception as e:
+        logger.error(f"Load Error: {e}")
 
-# --- HELPER FUNCTIONS ---
-def is_owner(uid): return uid == OWNER_ID
-def is_admin(uid): return uid in ADMIN_IDS
-
-async def get_or_create_user_topic(user, context):
-    """Creates a forum topic in the Support Group for the user."""
-    if not SUPPORT_GROUP_ID: 
-        print("❌ Support Group ID not set!")
-        return None
-    
-    if user.id in USER_TOPICS: 
-        # Check if topic is accessible (simplified: just return ID)
-        return USER_TOPICS[user.id]
-    
+def save_data_sync():
     try:
-        topic_name = f"{user.first_name[:30]} ({user.id})"
-        topic = await context.bot.create_forum_topic(chat_id=SUPPORT_GROUP_ID, name=topic_name)
-        USER_TOPICS[user.id] = topic.message_thread_id
-        save_data()
+        to_save = {
+            "ADMIN_IDS": DB["ADMIN_IDS"],
+            "BLOCKED_USERS": DB["BLOCKED_USERS"],
+            "FREE_CHANNELS": {str(k): v for k, v in DB["FREE_CHANNELS"].items()},
+            "PAID_CHANNELS": {str(k): v for k, v in DB["PAID_CHANNELS"].items()},
+            "USER_DATA": {str(k): v for k, v in DB["USER_DATA"].items()},
+            "USER_TOPICS": {str(k): v for k, v in DB["USER_TOPICS"].items()}
+        }
+        with open(DATA_FILE, "w") as f:
+            json.dump(to_save, f, indent=4)
+    except Exception as e:
+        logger.error(f"Save Error: {e}")
+
+async def save_data_async():
+    async with data_lock:
+        await asyncio.to_thread(save_data_sync)
+
+# --- HELPERS ---
+def is_admin(uid):
+    return uid == OWNER_ID or uid in DB["ADMIN_IDS"]
+
+async def check_membership(user_id, context):
+    if is_admin(user_id) or not MANDATORY_CHANNEL_ID: return True
+    try:
+        m = await context.bot.get_chat_member(MANDATORY_CHANNEL_ID, user_id)
+        return m.status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]
+    except: return True # Fail safe
+
+async def get_or_create_topic(user, context):
+    if not SUPPORT_GROUP_ID: return None
+    if user.id in DB["USER_TOPICS"]: return DB["USER_TOPICS"][user.id]
+
+    try:
+        # 1. Create Topic with Name + ID
+        name = f"{user.first_name[:20]} ({user.id})"
+        topic = await context.bot.create_forum_topic(SUPPORT_GROUP_ID, name)
+        DB["USER_TOPICS"][user.id] = topic.message_thread_id
+        await save_data_async()
         
+        # 2. Smart Search Link Generator
+        # (Links to: https://t.me/c/<id>/search?q=<user_id>)
+        # Note: We strip '-100' from ID for t.me link
+        group_id_str = str(SUPPORT_GROUP_ID).replace("-100", "")
+        search_url = f"https://t.me/c/{group_id_str}?q={user.id}"
+        
+        lang = user.language_code or "Unknown"
+        
+        # 3. Detailed Info Message (Pinned/First Msg)
+        text = (
+            f"👤 **NEW USER TICKET**\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📛 **Name:** {user.full_name}\n"
+            f"🆔 **ID:** `{user.id}`\n"
+            f"🔗 **Username:** @{user.username if user.username else 'None'}\n"
+            f"🌐 **Language:** {lang}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ *Agar yeh purana user hai, to 'Search History' dabakar purane messages check karein.*"
+        )
+        
+        kb = [[InlineKeyboardButton("🔎 Search Old History", url=search_url)]]
+
         await context.bot.send_message(
-            chat_id=SUPPORT_GROUP_ID, 
+            SUPPORT_GROUP_ID, 
+            text,
             message_thread_id=topic.message_thread_id,
-            text=f"🆕 **New Session Started**\nUser: {user.full_name}\nID: `{user.id}`\nUsername: @{user.username or 'None'}",
+            reply_markup=InlineKeyboardMarkup(kb),
             parse_mode=ParseMode.MARKDOWN
         )
         return topic.message_thread_id
     except Exception as e:
-        logger.error(f"Topic Create Error: {e}")
+        logger.error(f"Topic Error: {e}")
         return None
 
-async def is_member(user_id, context):
-    if is_admin(user_id) or not MANDATORY_CHANNEL_ID: return True
-    try:
-        m = await context.bot.get_chat_member(MANDATORY_CHANNEL_ID, user_id)
-        return m.status in [ChatMember.OWNER, ChatMember.ADMINISTRATOR, ChatMember.MEMBER]
-    except: return False
+# --- ADMIN COMMANDS ---
 
-# --- CORE HANDLERS ---
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not user or user.id in BLOCKED_USER_IDS: return
-
-    # Save user info
-    USER_DATA[str(user.id)] = {'full_name': user.full_name, 'username': user.username}
-    # Optional: save_data() here if you want real-time user persistence (heavy IO)
-    
-    # Init support topic if needed
-    if SUPPORT_GROUP_ID and user.id not in USER_TOPICS:
-        await get_or_create_user_topic(user, context)
-
-    # Role Based Menu
-    if is_owner(user.id):
-        kb = [[InlineKeyboardButton("🔑 Owner Panel", callback_data='owner_panel')],
-              [InlineKeyboardButton("👮‍♂️ Admin Panel", callback_data='admin_panel')]]
-        await update.message.reply_text(f"👑 **Owner Menu**\nWelcome Boss.", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
-    elif is_admin(user.id):
-        kb = [[InlineKeyboardButton("👮‍♂️ Admin Panel", callback_data='admin_panel')]]
-        await update.message.reply_text(f"👮‍♂️ **Admin Menu**\nReady to manage.", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
-    else:
-        # User Menu
-        if await is_member(user.id, context):
-            kb = [
-                [InlineKeyboardButton("🆓 Free Batches", callback_data='show_free'), InlineKeyboardButton("💎 Paid Batches", callback_data='show_paid')],
-                [InlineKeyboardButton("📂 My Batches", callback_data='my_batches'), InlineKeyboardButton("📞 Support", url=CONTACT_ADMIN_LINK or "https://t.me/telegram")],
-                [InlineKeyboardButton("📢 Channel", url=MANDATORY_CHANNEL_LINK or "https://t.me/telegram")]
-            ]
-            await update.message.reply_text(
-                f"👋 **Welcome {user.first_name}!**\nSelect an option below to continue.", 
-                reply_markup=InlineKeyboardMarkup(kb), 
-                parse_mode=ParseMode.MARKDOWN
-            )
-        else:
-            kb = [[InlineKeyboardButton("➡️ Join Channel", url=MANDATORY_CHANNEL_LINK or "#")], 
-                  [InlineKeyboardButton("✅ I joined", callback_data='verify')]]
-            await update.message.reply_text("⚠️ **Action Required**\nPlease join our mandatory channel to use this bot.", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
-
-async def batch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Command for users to see their batches"""
-    user_id = update.effective_user.id
-    report = "📂 **Your Batches:**\n\n"
-    
-    # Check Free
-    free_joined = []
-    for cid, name in FREE_CHANNELS.items():
-        try:
-            m = await context.bot.get_chat_member(cid, user_id)
-            if m.status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]:
-                free_joined.append(name)
-        except: pass
-        
-    # Check Paid
-    paid_joined = []
-    for cid, name in PAID_CHANNELS.items():
-        try:
-            m = await context.bot.get_chat_member(cid, user_id)
-            if m.status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]:
-                paid_joined.append(name)
-        except: pass
-    
-    if free_joined: report += "🆓 **Free:**\n" + "\n".join([f"- {n}" for n in free_joined]) + "\n\n"
-    if paid_joined: report += "💎 **Paid:**\n" + "\n".join([f"- {n}" for n in paid_joined])
-    if not free_joined and not paid_joined: report = "❌ You haven't joined any batches yet."
-    
-    await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN)
-
-# --- ADMIN / OWNER COMMANDS ---
-
-async def add_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_user.id): return
-    if not context.args: return await update.message.reply_text("Usage: /addadmin <id>")
+async def cmd_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID: return
     try:
         new_admin = int(context.args[0])
-        if new_admin not in ADMIN_IDS:
-            ADMIN_IDS.append(new_admin)
-            save_data()
-            await update.message.reply_text(f"✅ Admin {new_admin} added.")
+        if new_admin not in DB["ADMIN_IDS"]:
+            DB["ADMIN_IDS"].append(new_admin)
+            await save_data_async()
+            await update.message.reply_text(f"✅ User {new_admin} is now Admin.")
         else:
-            await update.message.reply_text("⚠️ Already an admin.")
-    except: await update.message.reply_text("❌ Invalid ID.")
+            await update.message.reply_text("⚠️ Already Admin.")
+    except: await update.message.reply_text("Usage: /addadmin [user_id]")
 
-async def remove_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_user.id): return
-    if not context.args: return await update.message.reply_text("Usage: /removeadmin <id>")
+async def cmd_del_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID: return
     try:
-        rem_admin = int(context.args[0])
-        if rem_admin in ADMIN_IDS:
-            ADMIN_IDS.remove(rem_admin)
-            save_data()
-            await update.message.reply_text(f"✅ Admin {rem_admin} removed.")
+        target = int(context.args[0])
+        if target in DB["ADMIN_IDS"] and target != OWNER_ID:
+            DB["ADMIN_IDS"].remove(target)
+            await save_data_async()
+            await update.message.reply_text(f"🗑 User {target} removed from Admin.")
         else:
-            await update.message.reply_text("⚠️ Not an admin.")
-    except: await update.message.reply_text("❌ Invalid ID.")
+            await update.message.reply_text("⚠️ Cannot remove.")
+    except: await update.message.reply_text("Usage: /deladmin [user_id]")
 
-async def add_batch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_add_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
-    # Start Wizard
-    context.user_data['step'] = 'batch_type'
-    kb = [[InlineKeyboardButton("🆓 Free", callback_data='type_free'), InlineKeyboardButton("💎 Paid", callback_data='type_paid')],
-          [InlineKeyboardButton("Cancel", callback_data='admin_panel')]]
-    await update.message.reply_text("🆕 **Add New Batch**\n\nSelect Batch Type:", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+    # Format: /addbatch [free/paid] [Name] [ID]
+    try:
+        btype = context.args[0].lower()
+        channel_id = int(context.args[-1])
+        name = " ".join(context.args[1:-1])
+        
+        if btype == "free":
+            DB["FREE_CHANNELS"][channel_id] = name
+        elif btype == "paid":
+            DB["PAID_CHANNELS"][channel_id] = name
+        else:
+            await update.message.reply_text("❌ Type must be 'free' or 'paid'")
+            return
 
-async def remove_batch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_user.id): return
-    # List batches with remove buttons
-    kb = []
-    for cid, name in FREE_CHANNELS.items():
-        kb.append([InlineKeyboardButton(f"❌ Del Free: {name}", callback_data=f'delbatch_f_{cid}')])
-    for cid, name in PAID_CHANNELS.items():
-        kb.append([InlineKeyboardButton(f"❌ Del Paid: {name}", callback_data=f'delbatch_p_{cid}')])
-    kb.append([InlineKeyboardButton("Cancel", callback_data='admin_panel')])
-    await update.message.reply_text("🗑 **Remove Batch**\nSelect to delete:", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+        await save_data_async()
+        await update.message.reply_text(f"✅ **{name}** added to {btype} list.")
+    except:
+        await update.message.reply_text("Usage: /addbatch [free/paid] [Name] [Channel_ID]")
 
-# --- CALLBACK HANDLER ---
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_del_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    # Format: /delbatch [free/paid] [ID]
+    try:
+        btype = context.args[0].lower()
+        cid = int(context.args[1])
+        
+        found = False
+        if btype == "free" and cid in DB["FREE_CHANNELS"]:
+            del DB["FREE_CHANNELS"][cid]
+            found = True
+        elif btype == "paid" and cid in DB["PAID_CHANNELS"]:
+            del DB["PAID_CHANNELS"][cid]
+            found = True
+            
+        if found:
+            await save_data_async()
+            await update.message.reply_text("✅ Batch removed.")
+        else:
+            await update.message.reply_text("❌ Batch not found.")
+    except:
+        await update.message.reply_text("Usage: /delbatch [free/paid] [Channel_ID]")
+
+async def cmd_user_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    try:
+        target_id = int(context.args[0])
+    except:
+        await update.message.reply_text("Usage: /user [chat_id]")
+        return
+
+    # Check if user exists
+    user_info = DB["USER_DATA"].get(target_id)
+    if not user_info:
+        await update.message.reply_text("❌ User never started the bot.")
+        return
+
+    msg = await update.message.reply_text("🔍 Scanning batches... please wait.")
+    
+    # Generate Report
+    report = f"USER REPORT FOR: {target_id}\n"
+    report += f"Name: {user_info.get('name', 'Unknown')}\n"
+    report += f"Username: {user_info.get('username', 'None')}\n"
+    report += f"Joined Bot: {time.ctime(user_info.get('joined_at', 0))}\n"
+    report += "-" * 30 + "\nBATCH STATUS:\n"
+
+    # Scan Free Batches
+    report += "\n[FREE BATCHES]\n"
+    for cid, cname in DB["FREE_CHANNELS"].items():
+        try:
+            m = await context.bot.get_chat_member(cid, target_id)
+            status = m.status
+        except: status = "Unknown/Error"
+        report += f"{cname} ({cid}): {status}\n"
+
+    # Scan Paid Batches
+    report += "\n[PAID BATCHES]\n"
+    for cid, cname in DB["PAID_CHANNELS"].items():
+        try:
+            m = await context.bot.get_chat_member(cid, target_id)
+            status = m.status
+        except: status = "Unknown/Error"
+        report += f"{cname} ({cid}): {status}\n"
+
+    # Create File
+    f = io.BytesIO(report.encode("utf-8"))
+    f.name = f"user_{target_id}_report.txt"
+    
+    await update.message.reply_document(document=f, caption=f"✅ Report for {target_id}")
+    await context.bot.delete_message(update.effective_chat.id, msg.message_id)
+
+async def cmd_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID: return
+    
+    msg = await update.message.reply_text("⏳ Generating full database report...")
+    
+    report = "ALL USERS DUMP\n"
+    report += f"Generated: {datetime.now()}\n"
+    report += "ID | Name | Username\n"
+    report += "-" * 50 + "\n"
+    
+    for uid, data in DB["USER_DATA"].items():
+        line = f"{uid} | {data.get('name', 'N/A')} | @{data.get('username', 'None')}\n"
+        report += line
+        
+    f = io.BytesIO(report.encode("utf-8"))
+    f.name = "all_users.txt"
+    
+    await update.message.reply_document(document=f, caption="✅ All Users List")
+    await context.bot.delete_message(update.effective_chat.id, msg.message_id)
+
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    txt = (
+        f"📊 **Stats**\n"
+        f"Users: {len(DB['USER_DATA'])}\n"
+        f"Free Batches: {len(DB['FREE_CHANNELS'])}\n"
+        f"Paid Batches: {len(DB['PAID_CHANNELS'])}\n"
+        f"Blocked: {len(DB['BLOCKED_USERS'])}"
+    )
+    await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
+
+async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID: return
+    if os.path.exists(DATA_FILE):
+        await update.message.reply_document(document=open(DATA_FILE, "rb"), caption="DB Backup")
+    else:
+        await update.message.reply_text("No DB file found.")
+
+# --- BROADCAST SYSTEM ---
+async def cmd_broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    BROADCAST_STATE[update.effective_user.id] = {"type": "broadcast", "step": "wait_msg"}
+    await update.message.reply_text("📢 **Broadcast Mode**\nSend the message (Text/Photo/Video) you want to broadcast.\nType /cancel to stop.")
+
+async def cmd_post_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    BROADCAST_STATE[update.effective_user.id] = {"type": "post", "step": "wait_msg"}
+    await update.message.reply_text("📝 **Post Mode**\nSend the message to post in all Batches.\nType /cancel to stop.")
+
+async def handle_broadcast_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id not in BROADCAST_STATE: return False
+    
+    state = BROADCAST_STATE[user.id]
+    
+    # Step 1: User sent the content
+    if state["step"] == "wait_msg":
+        state["content"] = update.message
+        state["step"] = "confirm"
+        
+        kb = [[InlineKeyboardButton("✅ YES, Send", callback_data="confirm_yes"),
+               InlineKeyboardButton("❌ NO, Cancel", callback_data="confirm_no")]]
+        
+        txt = "📢 **Confirmation**\nDo you want to send this message?"
+        if state["type"] == "post": txt = "📝 **Confirmation**\nPost this to all batches?"
+        
+        await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+        return True
+    
+    return False
+
+async def handle_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     uid = q.from_user.id
+    if uid not in BROADCAST_STATE: 
+        await q.answer("Expired session.")
+        return
+
     data = q.data
+    state = BROADCAST_STATE[uid]
+    msg_to_send = state.get("content")
     
-    if data == 'verify':
-        if await is_member(uid, context):
-            await q.answer("Verified! Welcome.")
-            await start_command(update, context)
-        else:
-            await q.answer("❌ Still not joined!", show_alert=True)
-            
-    elif data == 'my_batches':
-        # Simulate command
-        await batch_command(update, context)
-        await q.answer()
+    if data == "confirm_no":
+        del BROADCAST_STATE[uid]
+        await q.edit_message_text("❌ Action Cancelled.")
+        return
 
-    # --- USER JOIN FLOWS ---
-    elif data == 'show_free':
-        kb = [[InlineKeyboardButton(f"🔗 {n}", callback_data=f'getlink_f_{c}')] for c, n in FREE_CHANNELS.items()]
-        kb.append([InlineKeyboardButton("🔙 Back", callback_data='main_menu')])
-        await q.edit_message_text("🆓 **Available Free Batches:**", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+    if data == "confirm_yes":
+        await q.edit_message_text("⏳ Processing... (Do not use bot until done)")
         
-    elif data == 'show_paid':
-        kb = [[InlineKeyboardButton(f"💎 {n}", callback_data=f'sel_p_{c}')] for c, n in PAID_CHANNELS.items()]
-        kb.append([InlineKeyboardButton("🔙 Back", callback_data='main_menu')])
-        await q.edit_message_text("💎 **Premium Batches:**", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
-
-    # Free Link Generation (One-Time)
-    elif data.startswith('getlink_f_'):
-        cid = int(data.split('_')[2])
-        try:
-            # Create Member Limit 1 link
-            link_obj = await context.bot.create_chat_invite_link(chat_id=cid, member_limit=1, name=f"User-{uid}")
-            await q.answer("Link Generated!")
-            await context.bot.send_message(uid, f"🔗 **Your Unique Link:**\n{link_obj.invite_link}\n\n(Expires after 1 use)", parse_mode=ParseMode.MARKDOWN)
-        except Exception as e:
-            await q.answer("Error. Bot must be Admin.", show_alert=True)
-            logger.error(f"Link Gen Error: {e}")
-
-    # Paid Batch Selection
-    elif data.startswith('sel_p_'):
-        cid = int(data.split('_')[2])
-        kb = [
-            [InlineKeyboardButton("🕒 3hr Demo", callback_data=f'joindemo_{cid}')],
-            [InlineKeyboardButton("♾️ Permanent", callback_data=f'joinperm_{cid}')],
-            [InlineKeyboardButton("🔙 Back", callback_data='show_paid')]
-        ]
-        await q.edit_message_text(f"💎 **Select Access Type** for {PAID_CHANNELS.get(cid, 'Batch')}:", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
-
-    # Demo Link (Join Request)
-    elif data.startswith('joindemo_'):
-        cid = int(data.split('_')[1])
-        try:
-            # Join Request Link
-            link_obj = await context.bot.create_chat_invite_link(chat_id=cid, creates_join_request=True, name=f"Demo-{uid}")
-            DEMO_PENDING[uid] = cid # Track that this user wants a demo
-            await q.answer("Request Link Generated!")
+        count = 0
+        blocked = 0
+        
+        if state["type"] == "broadcast":
+            # Send to Users
+            users = list(DB["USER_DATA"].keys())
+            for target_id in users:
+                try:
+                    await context.bot.copy_message(target_id, uid, msg_to_send.message_id)
+                    count += 1
+                    await asyncio.sleep(0.05) # Safe Delay
+                except Forbidden:
+                    blocked += 1
+                    if target_id not in DB["BLOCKED_USERS"]: DB["BLOCKED_USERS"].append(target_id)
+                except Exception: pass
             
-            msg = (
-                f"🕒 **Demo Access Link**\n"
-                f"{link_obj.invite_link}\n\n"
-                f"1. Click Link -> Request to Join.\n"
-                f"2. Wait for Admin Approval.\n"
-                f"3. Once approved, you have 3 hours."
-            )
-            await context.bot.send_message(uid, msg, parse_mode=ParseMode.MARKDOWN)
-        except Exception as e:
-            await q.answer("Error. Bot needs Admin rights.", show_alert=True)
+            await context.bot.send_message(uid, f"✅ **Broadcast Done**\nSent: {count}\nBlocked: {blocked}")
 
-    # Permanent Link (Join Request)
-    elif data.startswith('joinperm_'):
-        cid = int(data.split('_')[1])
+        elif state["type"] == "post":
+            # Send to Batches
+            channels = list(DB["FREE_CHANNELS"].keys()) + list(DB["PAID_CHANNELS"].keys())
+            for cid in channels:
+                try:
+                    await context.bot.copy_message(cid, uid, msg_to_send.message_id)
+                    count += 1
+                    await asyncio.sleep(0.5) # Slower for channels
+                except Exception as e:
+                    logger.error(f"Post Fail {cid}: {e}")
+            
+            await context.bot.send_message(uid, f"✅ **Posting Done**\nChannels: {count}")
+
+        del BROADCAST_STATE[uid]
+
+# --- SYNC HANDLERS ---
+
+async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Syncs edited messages between User and Admin"""
+    if not update.edited_message: return
+    
+    msg = update.edited_message
+    chat_id = msg.chat.id
+    msg_id = msg.message_id
+    
+    # Check if we know this message
+    if (chat_id, msg_id) in MESSAGE_MAP:
+        target_chat, target_msg = MESSAGE_MAP[(chat_id, msg_id)]
+        
+        new_text = msg.text or msg.caption or "Media Content"
+        new_text = f"✏️ [EDITED]\n{new_text}"
+        
         try:
-            link_obj = await context.bot.create_chat_invite_link(chat_id=cid, creates_join_request=True, name=f"Perm-{uid}")
-            await q.answer("Link Generated!")
-            await context.bot.send_message(uid, f"♾️ **Permanent Access Link**\n{link_obj.invite_link}\n\nWait for approval after joining.", parse_mode=ParseMode.MARKDOWN)
+            await context.bot.edit_message_text(new_text, chat_id=target_chat, message_id=target_msg)
         except Exception as e:
-            await q.answer("Error.", show_alert=True)
+            # Maybe it's a caption, try edit_message_caption
+            try:
+                await context.bot.edit_message_caption(chat_id=target_chat, message_id=target_msg, caption=new_text)
+            except: pass
 
-    # --- ADMIN WIZARDS ---
-    elif data == 'admin_panel' and is_admin(uid):
+async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Syncs reactions"""
+    if not update.message_reaction: return
+    r = update.message_reaction
+    
+    # Key = Where the reaction happened
+    key = (r.chat.id, r.message_id)
+    
+    if key in MESSAGE_MAP:
+        target_chat, target_msg = MESSAGE_MAP[key]
+        try:
+            await context.bot.set_message_reaction(
+                chat_id=target_chat,
+                message_id=target_msg,
+                reaction=r.new_reaction
+            )
+        except Exception: pass
+
+# --- STANDARD MESSAGES ---
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id in DB["BLOCKED_USERS"]: return
+
+    # Register
+    if user.id not in DB["USER_DATA"]:
+        DB["USER_DATA"][user.id] = {
+            "name": user.full_name,
+            "username": user.username,
+            "joined_at": time.time(),
+            "demos": {}
+        }
+        await save_data_async()
+
+    # Create Support Topic
+    await get_or_create_topic(user, context)
+
+    # If Admin, show commands help
+    if is_admin(user.id):
+        txt = (
+            "👮‍♂️ **Admin Mode Active**\n\n"
+            "/stats - View Stats\n"
+            "/addbatch - Add Batch\n"
+            "/delbatch - Remove Batch\n"
+            "/broadcast - Broadcast Message\n"
+            "/post - Post to Channels\n"
+            "/user [id] - Get User Report\n"
+        )
+        if user.id == OWNER_ID:
+            txt += "\n👑 **Owner:**\n/addadmin | /deladmin | /allusers | /backup"
+        
+        await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # User Menu
+    if await check_membership(user.id, context):
+        await show_user_menu(update)
+    else:
+        kb = [[InlineKeyboardButton("📢 Join Channel", url=MANDATORY_CHANNEL_LINK)],
+              [InlineKeyboardButton("✅ I have Joined", callback_data="verify")]]
+        await update.message.reply_text("⚠️ Join channel first:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def show_user_menu(update: Update):
+    kb = [
+        [InlineKeyboardButton("🆓 Free Batches", callback_data="u_free"),
+         InlineKeyboardButton("💎 Paid Batches", callback_data="u_paid")],
+        [InlineKeyboardButton("📂 My Batches", callback_data="u_mine")]
+    ]
+    txt = "👋 **Welcome!** Choose an option:"
+    if update.callback_query:
+        await update.callback_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+
+# --- USER CALLBACKS (Still using buttons for Users as it's better UX) ---
+async def user_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    data = q.data
+    uid = q.from_user.id
+
+    # Admin Broadcast Confirmation
+    if data.startswith("confirm_"):
+        await handle_broadcast_callback(update, context)
+        return
+
+    if data == "verify":
+        if await check_membership(uid, context):
+            await q.answer("Verified!")
+            await show_user_menu(update)
+        else: await q.answer("❌ Not joined yet!", show_alert=True)
+    
+    elif data == "u_main": await show_user_menu(update)
+    
+    elif data == "u_free":
+        kb = [[InlineKeyboardButton(f"🔗 {n}", callback_data=f"get_f_{i}")] for i, n in DB["FREE_CHANNELS"].items()]
+        kb.append([InlineKeyboardButton("🔙 Back", callback_data="u_main")])
+        await q.edit_message_text("🆓 **Free Batches**", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+    
+    elif data == "u_paid":
+        kb = [[InlineKeyboardButton(f"💎 {n}", callback_data=f"view_p_{i}")] for i, n in DB["PAID_CHANNELS"].items()]
+        kb.append([InlineKeyboardButton("🔙 Back", callback_data="u_main")])
+        await q.edit_message_text("💎 **Paid Batches**", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+
+    elif data.startswith("get_f_"):
+        cid = int(data.split("_")[2])
+        try:
+            link = await context.bot.create_chat_invite_link(cid, member_limit=1, name=f"U-{uid}")
+            await q.answer("Link Sent!")
+            await context.bot.send_message(uid, f"🔗 **Link:**\n{link.invite_link}")
+        except: await q.answer("Error: Bot not admin there", show_alert=True)
+
+    elif data.startswith("view_p_"):
+        cid = int(data.split("_")[2])
         kb = [
-            [InlineKeyboardButton("📢 Broadcast", callback_data='wiz_bc'), InlineKeyboardButton("✍️ Post Batches", callback_data='wiz_post')],
-            [InlineKeyboardButton("➕ Add Batch", callback_data='wiz_addbatch'), InlineKeyboardButton("➖ Remove Batch", callback_data='wiz_rembatch')],
-            [InlineKeyboardButton("🔙 Main Menu", callback_data='main_menu')]
+            [InlineKeyboardButton("🕒 3hr Demo", callback_data=f"req_d_{cid}")],
+            [InlineKeyboardButton("♾️ Permanent", callback_data=f"req_p_{cid}")],
+            [InlineKeyboardButton("🔙 Back", callback_data="u_paid")]
         ]
-        await q.edit_message_text("👮‍♂️ **Admin Panel**", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+        await q.edit_message_text("Select Access:", reply_markup=InlineKeyboardMarkup(kb))
 
-    elif data == 'owner_panel' and is_owner(uid):
-        kb = [[InlineKeyboardButton("👥 Users", callback_data='mng_users'), InlineKeyboardButton("⬇️ Backup", callback_data='get_backup')],
-              [InlineKeyboardButton("🔙 Back", callback_data='main_menu')]]
-        await q.edit_message_text("🔑 **Owner Panel**", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+    elif data.startswith("req_d_"):
+        cid = int(data.split("_")[2])
+        PENDING_DEMO_REQUESTS[uid] = cid
+        try:
+            link = await context.bot.create_chat_invite_link(cid, creates_join_request=True, name=f"D-{uid}")
+            await context.bot.send_message(uid, f"⏱ **Demo Link:**\n{link.invite_link}\n(Join -> Wait for approval)")
+            await q.answer()
+        except: await q.answer("Error", show_alert=True)
 
-    elif data == 'main_menu':
-        await q.delete_message()
-        await start_command(update, context)
+    elif data.startswith("req_p_"):
+        cid = int(data.split("_")[2])
+        try:
+            link = await context.bot.create_chat_invite_link(cid, creates_join_request=True, name=f"P-{uid}")
+            await context.bot.send_message(uid, f"♾️ **Perm Link:**\n{link.invite_link}")
+            await q.answer()
+        except: await q.answer("Error", show_alert=True)
 
-    # Add Batch Wizard
-    elif data == 'wiz_addbatch':
-        await add_batch_command(update, context)
-        await q.answer()
-    
-    elif data.startswith('type_'):
-        b_type = data.split('_')[1] # free or paid
-        context.user_data['batch_wiz'] = {'type': b_type}
-        context.user_data['step'] = 'batch_name'
-        await q.edit_message_text(f"Selected: {b_type.upper()}\n\n➡️ **Send the Name** for this batch:")
-
-    # Remove Batch
-    elif data == 'wiz_rembatch':
-        await remove_batch_command(update, context)
-        await q.answer()
-    
-    elif data.startswith('delbatch_'):
-        parts = data.split('_')
-        b_type, cid = parts[1], int(parts[2])
-        if b_type == 'f' and cid in FREE_CHANNELS:
-            del FREE_CHANNELS[cid]
-        elif b_type == 'p' and cid in PAID_CHANNELS:
-            del PAID_CHANNELS[cid]
-        save_data()
-        await q.answer("Batch Removed")
-        await remove_batch_command(update, context) # Refresh list
-
-    # Broadcast/Post Wizards
-    elif data == 'wiz_bc':
-        context.user_data['step'] = 'broadcast'
-        await q.edit_message_text("📢 **Broadcast Mode**\nSend the message you want to broadcast (Text, Photo, etc).")
-    
-    elif data == 'wiz_post':
-        context.user_data['step'] = 'post_batch'
-        await q.edit_message_text("✍️ **Batch Post Mode**\nSend the message to post in ALL batches.")
-
-    elif data == 'get_backup' and is_owner(uid):
-        if os.path.exists(DATA_FILE):
-            await context.bot.send_document(uid, document=open(DATA_FILE, 'rb'), caption="📦 Backup")
-        else: await q.answer("No Data.", show_alert=True)
-
-    await q.answer()
-
-# --- MESSAGE HANDLERS ---
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- MESSAGE HANDLER ---
+async def main_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
-    if not user: return
     
-    # 1. Admin Wizard Inputs
-    if 'step' in context.user_data:
-        step = context.user_data['step']
-        text = update.message.text
-        
-        if step == 'batch_name':
-            if not text: return
-            context.user_data['batch_wiz']['name'] = text
-            context.user_data['step'] = 'batch_id'
-            await update.message.reply_text(f"Name set to: {text}\n\n➡️ **Now Send the Channel ID** (e.g. -100123...):")
-            return
-            
-        elif step == 'batch_id':
-            try:
-                cid = int(text)
-                wiz = context.user_data['batch_wiz']
-                if wiz['type'] == 'free':
-                    FREE_CHANNELS[cid] = wiz['name']
-                else:
-                    PAID_CHANNELS[cid] = wiz['name']
-                save_data()
-                del context.user_data['step']
-                await update.message.reply_text(f"✅ Batch Added Successfully!\n\n**Note:** Make sure to add me as Admin in that channel so I can generate links.")
-            except ValueError:
-                await update.message.reply_text("❌ Invalid ID. It must be an integer starting with -100.")
-            return
+    # 1. Check Broadcast Flow
+    if await handle_broadcast_flow(update, context):
+        return
 
-        elif step == 'broadcast':
-            msg = await update.message.reply_text("⏳ Sending...")
-            count = 0
-            for uid in list(USER_DATA.keys()):
-                try:
-                    await context.bot.copy_message(uid, chat.id, update.message.id)
-                    count += 1
-                except: pass
-            del context.user_data['step']
-            await context.bot.edit_message_text(chat_id=chat.id, message_id=msg.message_id, text=f"✅ Broadcast Sent to {count} users.")
-            return
-
-        elif step == 'post_batch':
-            msg = await update.message.reply_text("⏳ Posting...")
-            count = 0
-            all_cids = list(FREE_CHANNELS.keys()) + list(PAID_CHANNELS.keys())
-            for cid in all_cids:
-                try:
-                    await context.bot.copy_message(cid, chat.id, update.message.id)
-                    count += 1
-                except: pass
-            del context.user_data['step']
-            await context.bot.edit_message_text(chat_id=chat.id, message_id=msg.message_id, text=f"✅ Posted in {count} batches.")
-            return
-
-    # 2. Support System (Private -> Topic)
+    # 2. Support System (User -> Admin)
     if chat.type == ChatType.PRIVATE:
-        topic_id = await get_or_create_user_topic(user, context)
+        if user.id in DB["BLOCKED_USERS"]: return
+        topic_id = await get_or_create_topic(user, context)
         if topic_id:
             try:
-                fwd = await context.bot.forward_message(SUPPORT_GROUP_ID, user.id, update.message.id, message_thread_id=topic_id)
-                # No sync logic needed here as Fwd is handled by Telegram
-                pass
-            except Exception as e: logger.error(f"Fwd error: {e}")
+                sent = await context.bot.forward_message(SUPPORT_GROUP_ID, user.id, update.message.id, message_thread_id=topic_id)
+                # Save Mapping
+                MESSAGE_MAP[(user.id, update.message.id)] = (SUPPORT_GROUP_ID, sent.message_id)
+                MESSAGE_MAP[(SUPPORT_GROUP_ID, sent.message_id)] = (user.id, update.message.id)
+            except Exception as e: logger.error(f"Fwd Error: {e}")
 
-    # 3. Support System (Topic -> Private)
+    # 3. Support System (Admin -> User)
     elif chat.id == SUPPORT_GROUP_ID and update.message.message_thread_id:
         topic_id = update.message.message_thread_id
-        
-        # Admin Deletion Command
-        if update.message.text and update.message.text.strip() == "/delete" and update.message.reply_to_message:
-            # Admin wants to delete a message sent to the user
-            reply_msg_id = update.message.reply_to_message.message_id
-            # Find the user message ID associated with this topic message
-            key = (SUPPORT_GROUP_ID, reply_msg_id)
-            if key in MESSAGE_MAP:
-                target_chat, target_msg = MESSAGE_MAP[key]
-                try:
-                    await context.bot.delete_message(target_chat, target_msg)
-                    await update.message.reply_text("✅ Deleted for user.")
-                except Exception as e:
-                    await update.message.reply_text(f"❌ Could not delete: {e}")
-            return
-
-        # Normal Reply (Copy Message)
         target_uid = None
-        for uid, tid in USER_TOPICS.items():
-            if tid == topic_id: target_uid = uid; break
+        for u, t in DB["USER_TOPICS"].items():
+            if t == topic_id: target_uid = int(u); break
         
         if target_uid:
             try:
-                sent_msg = await context.bot.copy_message(target_uid, chat.id, update.message.id)
-                # Store mapping for Deletion Sync and Reaction Sync
-                MESSAGE_MAP[(chat.id, update.message.id)] = (target_uid, sent_msg.message_id)
-                # Reverse map for Reaction Sync (User reacts to sent_msg -> Show on TopicMsg)
-                MESSAGE_MAP[(target_uid, sent_msg.message_id)] = (chat.id, update.message.id)
-            except Exception as e:
-                await update.message.reply_text(f"❌ Send Failed: {e}")
+                sent = await context.bot.copy_message(target_uid, chat.id, update.message.id)
+                # Save Mapping
+                MESSAGE_MAP[(SUPPORT_GROUP_ID, update.message.id)] = (target_uid, sent.message_id)
+                MESSAGE_MAP[(target_uid, sent.message_id)] = (SUPPORT_GROUP_ID, update.message.id)
+            except: await update.message.reply_text("❌ User blocked bot.")
 
-# --- SYNC HANDLERS ---
-async def reaction_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Syncs reactions between User Private Chat and Admin Topic"""
-    if not update.message_reaction: return
-    
-    chat_id = update.message_reaction.chat.id
-    msg_id = update.message_reaction.message_id
-    new_reaction = update.message_reaction.new_reaction
-    
-    # Check if this message is in our map
-    if (chat_id, msg_id) in MESSAGE_MAP:
-        target_chat, target_msg = MESSAGE_MAP[(chat_id, msg_id)]
-        try:
-            # Apply reaction to target
-            await context.bot.set_message_reaction(chat_id=target_chat, message_id=target_msg, reaction=new_reaction)
-        except Exception: pass
-
-# --- BATCH ACCESS LOGIC (DEMO TIMER) ---
-async def demo_expired(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    user_id = job.data.get('user_id')
-    chat_id = job.data.get('chat_id')
-    
-    # Notify Admin
-    if LOG_CHANNEL_ID:
-        try:
-            await context.bot.send_message(LOG_CHANNEL_ID, f"⏰ **Demo Expired**\nUser: {user_id}\nChat: {chat_id}\n\nPlease kick them manually or use /ban.")
-        except: pass
-    
-    # Notify User
-    try:
-        await context.bot.send_message(user_id, "⏰ **Demo Time Over**\nYour 3-hour trial has ended. Please join the Permanent batch to continue.")
-    except: pass
-    
-    # Try to kick (Ban then Unban)
-    try:
-        await context.bot.ban_chat_member(chat_id, user_id)
-        await context.bot.unban_chat_member(chat_id, user_id)
-    except Exception as e:
-        logger.error(f"Failed to auto-kick demo user: {e}")
-
-async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles Pending Join Requests"""
-    # req = update.chat_join_request
-    # For now, we rely on admins to approve requests in the Telegram UI
-    # We could add auto-approve logic here if needed
-    pass
-
-async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Tracks when user actually enters the chat (after approval)"""
-    res = update.chat_member
-    if not res: return
-    
-    user = res.from_user
-    chat = res.chat
-    
-    # 1. Mandatory Channel Check (Auto Kick if they left)
-    if chat.id == MANDATORY_CHANNEL_ID:
-        if res.new_chat_member.status in [ChatMember.LEFT, ChatMember.BANNED]:
-            # User left mandatory channel -> Kick from all Free batches
-            for cid in FREE_CHANNELS:
-                try:
-                    await context.bot.ban_chat_member(cid, user.id)
-                    await context.bot.unban_chat_member(cid, user.id)
+# --- JOB QUEUE (DEMO EXPIRE) ---
+async def check_demos(context: ContextTypes.DEFAULT_TYPE):
+    now = time.time()
+    users_mod = False
+    for uid, data in DB["USER_DATA"].items():
+        if "demos" not in data: continue
+        d = data["demos"].copy()
+        for bid, expiry in d.items():
+            if now > expiry:
+                try: 
+                    await context.bot.ban_chat_member(int(bid), uid)
+                    await context.bot.unban_chat_member(int(bid), uid)
+                    await context.bot.send_message(uid, "⏰ Demo Expired.")
                 except: pass
-            if LOG_CHANNEL_ID: 
-                try:
-                    await context.bot.send_message(LOG_CHANNEL_ID, f"🚫 **Auto-Kick**: {user.full_name} left mandatory channel.")
-                except: pass
+                del data["demos"][bid]
+                users_mod = True
+    if users_mod: await save_data_async()
+
+async def on_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cm = update.chat_member
+    if not cm: return
+    u = cm.from_user
+    c = cm.chat
+    status = cm.new_chat_member.status
     
-    # 2. Paid Batch Entry (Demo Check)
-    if res.new_chat_member.status == ChatMember.MEMBER:
-        # Check if they were pending demo
-        if user.id in DEMO_PENDING and DEMO_PENDING[user.id] == chat.id:
-            # Start 3 Hour Timer
-            context.job_queue.run_once(demo_expired, 10800, data={'user_id': user.id, 'chat_id': chat.id})
-            del DEMO_PENDING[user.id]
-            try:
-                await context.bot.send_message(user.id, f"✅ **Welcome to {chat.title}!**\nYour 3-hour demo starts now.")
-            except: pass
-        
-        # General Welcome for Permanent/Paid
-        elif chat.id in PAID_CHANNELS:
-             try:
-                await context.bot.send_message(user.id, f"✅ **Welcome to {chat.title}!**\nMembership Active.")
-             except: pass
+    # Demo Logic
+    if status == ChatMember.MEMBER:
+        if u.id in PENDING_DEMO_REQUESTS and PENDING_DEMO_REQUESTS[u.id] == c.id:
+            if "demos" not in DB["USER_DATA"][u.id]: DB["USER_DATA"][u.id]["demos"] = {}
+            DB["USER_DATA"][u.id]["demos"][str(c.id)] = time.time() + (3*3600)
+            await save_data_async()
+            del PENDING_DEMO_REQUESTS[u.id]
 
-
-# --- MAIN SETUP ---
-
-async def post_init(app: Application):
-    """Sets commands"""
-    # Standard User Commands
-    await app.bot.set_my_commands([
-        ("start", "Main Menu"),
-        ("batch", "My Batches"),
-        ("help", "Help")
-    ])
-
+# --- MAIN ---
 def main():
     load_data()
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    # Commands
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("addadmin", cmd_add_admin))
+    app.add_handler(CommandHandler("deladmin", cmd_del_admin))
+    app.add_handler(CommandHandler("addbatch", cmd_add_batch))
+    app.add_handler(CommandHandler("delbatch", cmd_del_batch))
+    app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("backup", cmd_backup))
+    app.add_handler(CommandHandler("user", cmd_user_details))
+    app.add_handler(CommandHandler("allusers", cmd_all_users))
     
-    # Handlers
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("batch", batch_command))
+    # Broadcast Flows
+    app.add_handler(CommandHandler("broadcast", cmd_broadcast_start))
+    app.add_handler(CommandHandler("post", cmd_post_start))
+    app.add_handler(CommandHandler("cancel", lambda u,c: u.message.reply_text("Cancelled."))) # Simple Cancel
+
+    # Sync Handlers
+    app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_edit))
+    app.add_handler(MessageReactionHandler(handle_reaction))
     
-    # Admin
-    app.add_handler(CommandHandler("addadmin", add_admin_command))
-    app.add_handler(CommandHandler("removeadmin", remove_admin_command))
-    app.add_handler(CommandHandler("addbatch", add_batch_command))
-    app.add_handler(CommandHandler("removebatch", remove_batch_command))
+    # General Handlers
+    app.add_handler(CallbackQueryHandler(user_callback_handler))
+    app.add_handler(ChatJoinRequestHandler(on_join))
+    app.add_handler(ChatMemberHandler(on_join, ChatMemberHandler.CHAT_MEMBER))
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, main_message_handler))
     
-    app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(ChatJoinRequestHandler(handle_join_request))
-    app.add_handler(ChatMemberHandler(handle_new_member, ChatMemberHandler.CHAT_MEMBER))
-    app.add_handler(MessageReactionHandler(reaction_handler))
+    if app.job_queue: app.job_queue.run_repeating(check_demos, interval=60, first=10)
     
-    # Message Handler (Must be last)
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
-    
-    print("Bot Upgraded & Running on Termux/Cloud...")
+    print("Bot Running (Final v3.0)...")
     app.run_polling()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
-
-
