@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 """
-ULTIMATE BOT MANAGER (v9.2 - Interface Update)
+ULTIMATE BOT MANAGER (v9.2.1 - Channel ID Fix)
 Features Included:
 1.  Owner Commands: /addadmin, /deladmin, /backup, /allusers
 2.  Admin Commands: /stats, /user, /addbatch, /delbatch, /broadcast, /post, /cancel
@@ -17,6 +17,7 @@ Features Included:
     - MongoDB Support (for Heroku/Render) to prevent data loss on restart.
 6.  New Interfaces:
     - Separate Welcome Messages for Owner, Admin, and Users.
+    - Improved Channel ID detection.
 """
 
 import logging
@@ -53,7 +54,7 @@ try:
         port = int(os.environ.get("PORT", "8080"))
         app = Flask(__name__)
         @app.route('/')
-        def index(): return "Bot Running - v9.2 Interface Update", 200
+        def index(): return "Bot Running - v9.2.1 Channel Fix", 200
         
         def run():
             app.run(host="0.0.0.0", port=port, use_reloader=False)
@@ -908,6 +909,9 @@ def main():
     # 1. Core Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("id", cmd_id))
+    
+    # NEW: Specific handler for /id in channels (often missed by CommandHandler)
+    app.add_handler(MessageHandler(filters.Regex(r"^/id(@\w+)?$") & filters.ChatType.CHANNEL, cmd_id))
     
     # 2. Owner Commands
     app.add_handler(CommandHandler("addadmin", cmd_add_admin))
