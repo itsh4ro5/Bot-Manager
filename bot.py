@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 """
-ULTIMATE BOT MANAGER (v9.2.1 - Channel ID Fix)
+ULTIMATE BOT MANAGER (v9.3 - Auto-Name Feature)
 Features Included:
 1.  Owner Commands: /addadmin, /deladmin, /backup, /allusers
 2.  Admin Commands: /stats, /user, /addbatch, /delbatch, /broadcast, /post, /cancel
@@ -13,6 +13,7 @@ Features Included:
     - History Search Link in Tickets
     - Admin Command Auto-Deletion (20 mins)
     - Bidirectional Message Edit & Reaction Sync
+    - **NEW: Auto-Detect Batch Name from Channel ID**
 5.  Persistence:
     - MongoDB Support (for Heroku/Render) to prevent data loss on restart.
 6.  New Interfaces:
@@ -54,7 +55,7 @@ try:
         port = int(os.environ.get("PORT", "8080"))
         app = Flask(__name__)
         @app.route('/')
-        def index(): return "Bot Running - v9.2.1 Channel Fix", 200
+        def index(): return "Bot Running - v9.3 Auto-Name", 200
         
         def run():
             app.run(host="0.0.0.0", port=port, use_reloader=False)
@@ -504,8 +505,14 @@ async def wizard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if data in ["wiz_free", "wiz_paid"]:
         ADMIN_WIZARD[uid]["type"] = "free" if data == "wiz_free" else "paid"
-        ADMIN_WIZARD[uid]["step"] = "ask_name"
-        await q.edit_message_text(f"Selected: **{data.split('_')[1].upper()}**\n\n➡️ Please send the **Batch Name** now:", parse_mode=ParseMode.MARKDOWN)
+        # SKIP NAME STEP - GO DIRECT TO ID
+        ADMIN_WIZARD[uid]["step"] = "ask_id"
+        await q.edit_message_text(
+            f"Selected: **{data.split('_')[1].upper()}**\n\n"
+            f"➡️ Now please send the **Channel ID** (starts with -100):\n"
+            f"ℹ️ *Bot will automatically detect the Channel Name.*", 
+            parse_mode=ParseMode.MARKDOWN
+        )
 
 async def wizard_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -516,24 +523,29 @@ async def wizard_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     state = ADMIN_WIZARD[uid]
     
-    if state["step"] == "ask_name":
-        state["name"] = txt
-        state["step"] = "ask_id"
-        msg = await update.message.reply_text(f"Name: {txt}\n\n➡️ Now send the **Channel ID** (starts with -100):")
-        await schedule_delete(context, update.message)
-        await schedule_delete(context, msg)
-        return True
-        
-    elif state["step"] == "ask_id":
+    if state["step"] == "ask_id":
         try:
             cid = int(txt)
+            
+            # Fetch Chat Details Automatically
+            try:
+                chat_obj = await context.bot.get_chat(cid)
+                batch_name = chat_obj.title
+                if not batch_name:
+                    batch_name = f"Batch {cid}" # Fallback
+            except Exception as e:
+                # If bot is not added or can't see the channel
+                await update.message.reply_text("❌ **Error:** Could not fetch Channel Name.\nMake sure the **Bot is added to the channel as Admin!**\n\n➡️ Try sending the ID again after adding the bot.", parse_mode=ParseMode.MARKDOWN)
+                return True
+
             target = DB["FREE_CHANNELS"] if state["type"] == "free" else DB["PAID_CHANNELS"]
-            target[cid] = state["name"]
+            target[cid] = batch_name
             await save_data_async()
-            msg = await update.message.reply_text(f"✅ **Batch Added Successfully!**\nName: {state['name']}\nID: `{cid}`", parse_mode=ParseMode.MARKDOWN)
+            
+            msg = await update.message.reply_text(f"✅ **Batch Added Successfully!**\n\n📛 Name: {batch_name}\n🆔 ID: `{cid}`", parse_mode=ParseMode.MARKDOWN)
             del ADMIN_WIZARD[uid]
-        except:
-            msg = await update.message.reply_text("❌ Invalid ID format. Try again.")
+        except ValueError:
+            msg = await update.message.reply_text("❌ Invalid ID format. Please send a valid numeric ID (e.g., -100xxxxx).")
         
         await schedule_delete(context, update.message)
         await schedule_delete(context, msg)
@@ -942,7 +954,7 @@ def main():
     if app.job_queue: 
         app.job_queue.run_repeating(check_demos, interval=60, first=10)
     
-    print("Bot v9.2 Interface Edition Started...")
+    print("Bot v9.3 Interface Edition Started...")
     app.run_polling()
 
 if __name__ == "__main__":
