@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 """
-ULTIMATE BOT MANAGER (v9.3 - Auto-Name Feature)
+ULTIMATE BOT MANAGER (v9.4 - Auto-Approval & Checks)
 Features Included:
 1.  Owner Commands: /addadmin, /deladmin, /backup, /allusers
 2.  Admin Commands: /stats, /user, /addbatch, /delbatch, /broadcast, /post, /cancel
@@ -13,7 +13,9 @@ Features Included:
     - History Search Link in Tickets
     - Admin Command Auto-Deletion (20 mins)
     - Bidirectional Message Edit & Reaction Sync
-    - **NEW: Auto-Detect Batch Name from Channel ID**
+    - Auto-Detect Batch Name from Channel ID
+    - **NEW: Pre-Link Membership Check** (No link if already joined)
+    - **NEW: Auto-Approve Free Batches** (Only if Mandatory Channel Joined)
 5.  Persistence:
     - MongoDB Support (for Heroku/Render) to prevent data loss on restart.
 6.  New Interfaces:
@@ -55,7 +57,7 @@ try:
         port = int(os.environ.get("PORT", "8080"))
         app = Flask(__name__)
         @app.route('/')
-        def index(): return "Bot Running - v9.3 Auto-Name", 200
+        def index(): return "Bot Running - v9.4 Auto-Approval", 200
         
         def run():
             app.run(host="0.0.0.0", port=port, use_reloader=False)
@@ -215,6 +217,18 @@ async def check_membership(user_id, context):
         m = await context.bot.get_chat_member(MANDATORY_CHANNEL_ID, user_id)
         return m.status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]
     except: return True # Fail open if bot is not admin in channel
+
+async def is_already_in_channel(context, chat_id, user_id):
+    """Checks if user is already a member of a specific channel."""
+    try:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        if member.status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]:
+            return True
+        return False
+    except BadRequest:
+        return False # User never seen or not in chat
+    except Exception:
+        return False # Fallback
 
 async def delete_later(context: ContextTypes.DEFAULT_TYPE):
     """Job to auto-delete messages."""
@@ -713,10 +727,43 @@ async def main_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 await context.bot.send_message(SUPPORT_GROUP_ID, "❌ User has blocked the bot.", message_thread_id=topic_id)
             except: pass
 
-# --- 12. JOIN LOGIC & DEMO TIMER ---
+# --- 12. JOIN REQUEST & DEMO TIMER ---
+
+async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles Join Requests for Free & Paid Batches.
+    - Free: Auto-Accept if user in Mandatory Channel.
+    - Paid: Do Nothing (Admin Manual Accept).
+    """
+    req = update.chat_join_request
+    chat = req.chat
+    user = req.from_user
+    
+    # 1. Logic for FREE BATCHES
+    if chat.id in DB["FREE_CHANNELS"]:
+        # Check Mandatory Membership
+        is_member = await check_membership(user.id, context)
+        
+        if is_member:
+            try:
+                await context.bot.approve_chat_join_request(chat.id, user.id)
+                await context.bot.send_message(user.id, f"✅ **Request Approved!**\nWelcome to {chat.title}", parse_mode=ParseMode.MARKDOWN)
+            except Exception as e:
+                logger.error(f"Auto-Approve Error: {e}")
+        else:
+            # Decline & Message
+            try:
+                await context.bot.send_message(user.id, f"⚠️ **Request Declined!**\n\nTo join **{chat.title}**, you must first join our Main Channel:\n{MANDATORY_CHANNEL_LINK}\n\n➡️ *Join the Main Channel and then try again.*", parse_mode=ParseMode.MARKDOWN)
+                await context.bot.decline_chat_join_request(chat.id, user.id)
+            except: pass
+
+    # 2. Logic for PAID BATCHES
+    # Do nothing - Admins/Owners will manually accept in Telegram
+    elif chat.id in DB["PAID_CHANNELS"]:
+        pass
 
 async def on_join_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Detects when Admin approves a join request (Invite -> Member)."""
+    """Detects when Admin approves a join request (Invite -> Member) [For Paid Demos mainly]."""
     cm = update.chat_member
     if not cm: return
     user = cm.from_user
@@ -796,8 +843,15 @@ async def general_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("get_f_"):
         try:
             cid = int(data.split("_")[2])
-            l = await context.bot.create_chat_invite_link(cid, member_limit=1, name=f"U-{uid}")
-            await context.bot.send_message(uid, f"🔗 **Your Free Link:**\n{l.invite_link}\n(One-time use only)")
+            
+            # 1. Check if already joined
+            if await is_already_in_channel(context, cid, uid):
+                await q.answer("⚠️ You are already in this channel!", show_alert=True)
+                return
+
+            # 2. Generate Approval Link (creates_join_request=True)
+            l = await context.bot.create_chat_invite_link(cid, creates_join_request=True, name=f"Free-{uid}")
+            await context.bot.send_message(uid, f"🔗 **Free Batch Link:**\n{l.invite_link}\n\nℹ️ *Click 'Request to Join'. Auto-Approved if you joined Main Channel.*")
             await q.answer("Link sent to DM!")
         except Exception as e: 
             logger.error(f"Link Gen Error: {e}")
@@ -814,6 +868,11 @@ async def general_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data.startswith("req_d_"):
         cid = int(data.split("_")[2])
+        # Check if already joined
+        if await is_already_in_channel(context, cid, uid):
+            await q.answer("⚠️ You are already in this channel!", show_alert=True)
+            return
+
         # Save intent
         DB["PENDING_REQUESTS"][uid] = cid
         await save_data_async()
@@ -825,9 +884,14 @@ async def general_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data.startswith("req_p_"):
         cid = int(data.split("_")[2])
+        # Check if already joined
+        if await is_already_in_channel(context, cid, uid):
+            await q.answer("⚠️ You are already in this channel!", show_alert=True)
+            return
+
         try:
             l = await context.bot.create_chat_invite_link(cid, creates_join_request=True, name=f"Perm-{uid}")
-            await context.bot.send_message(uid, f"💎 **Permanent Link:**\n{l.invite_link}")
+            await context.bot.send_message(uid, f"💎 **Permanent Link:**\n{l.invite_link}\n\nℹ️ *Request will be pending until Admin/Owner accepts it.*")
             await q.answer("Check your DM!")
         except: await q.answer("Error generating link", show_alert=True)
 
@@ -942,6 +1006,10 @@ def main():
     
     # 4. Callbacks & Events
     app.add_handler(CallbackQueryHandler(general_callback))
+    
+    # NEW: Handle Join Requests (Auto-Approval Logic)
+    app.add_handler(ChatJoinRequestHandler(handle_join_request))
+    
     app.add_handler(ChatMemberHandler(on_join_update, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageReactionHandler(handle_reaction))
     app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_edit))
@@ -954,7 +1022,7 @@ def main():
     if app.job_queue: 
         app.job_queue.run_repeating(check_demos, interval=60, first=10)
     
-    print("Bot v9.3 Interface Edition Started...")
+    print("Bot v9.4 Interface Edition Started...")
     app.run_polling()
 
 if __name__ == "__main__":
