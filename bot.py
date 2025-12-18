@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 
 """
-ULTIMATE BOT MANAGER (v9.6 - Complete Feature Set)
-Restored & Enhanced Version
+ULTIMATE BOT MANAGER (v9.7 - Fixes & Enhanced Discovery)
+Fixes Implemented:
+1. /batches: Shows ALL connected chats (Passive Discovery added).
+2. /user: Only lists chats where user is ACTUALLY joined (Filters out 'Left'/'Kicked').
 
 FEATURES INCLUDED:
 1.  Owner Commands: /addadmin, /deladmin, /backup, /allusers
@@ -20,10 +22,10 @@ FEATURES INCLUDED:
     - Admin Command Auto-Deletion (20 mins)
     - Bidirectional Message Edit & Reaction Sync
     - Auto-Detect Batch Name from Channel ID
-    - **RESTORED: Pre-Link Membership Check** (Checks if user is already in channel before sending link)
-    - **RESTORED: Auto-Approve Free Batches** (Only if Mandatory Channel Joined)
-    - **NEW: Deep User Scan** (Checks all known batches, not just lists)
-    - **NEW: Auto-Track Bot Membership** (Saves any chat bot is added to)
+    - **Pre-Link Membership Check** (Checks if user is already in channel before sending link)
+    - **Auto-Approve Free Batches** (Only if Mandatory Channel Joined)
+    - **Deep User Scan** (Checks all known batches, filters only joined ones)
+    - **Auto-Track Bot Membership** (Saves any chat bot is added to or active in)
 5.  Persistence:
     - MongoDB Support (Critical for remembering Topics after redeploy)
     - Local JSON Fallback
@@ -63,7 +65,7 @@ try:
         port = int(os.environ.get("PORT", "8080"))
         app = Flask(__name__)
         @app.route('/')
-        def index(): return "Bot Running - v9.6 Complete", 200
+        def index(): return "Bot Running - v9.7 Fixes", 200
         
         def run():
             app.run(host="0.0.0.0", port=port, use_reloader=False)
@@ -423,10 +425,10 @@ async def cmd_user_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     report = f"USER DETAILS REPORT: {target_id}\n"
     report += f"Name: {info.get('name') if info else 'Unknown'}\n"
     report += f"Joined Bot: {time.ctime(info.get('joined_at',0)) if info else 'Unknown'}\n\n"
-    report += "--- BATCH MEMBERSHIP STATUS ---\n"
+    report += "--- BATCH MEMBERSHIP STATUS (JOINED ONLY) ---\n"
     
-    # Merge lists to get unique set of chats to check
-    all_known_chats = set(list(DB["FREE_CHANNELS"].keys()) + list(DB["PAID_CHANNELS"].keys()) + list(DB["ALL_CHATS"].keys()))
+    # FIX 1: Ensure all keys are captured (Passive discovery relies on DB["ALL_CHATS"] being populated)
+    all_known_chats = set(list(DB["ALL_CHATS"].keys()) + list(DB["FREE_CHANNELS"].keys()) + list(DB["PAID_CHANNELS"].keys()))
     
     found_any = False
     for cid in all_known_chats:
@@ -436,24 +438,26 @@ async def cmd_user_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
         b_type = "OTHER"
         if cid in DB["FREE_CHANNELS"]: b_type = "FREE"
         elif cid in DB["PAID_CHANNELS"]: b_type = "PAID"
+        elif cid == SUPPORT_GROUP_ID: b_type = "SUPPORT"
+        elif cid == MANDATORY_CHANNEL_ID: b_type = "MAIN"
+        elif cid == LOG_CHANNEL_ID: b_type = "LOG"
         
         try:
             m = await context.bot.get_chat_member(cid, target_id)
-            status = m.status.upper()
-            if status in ['MEMBER', 'ADMINISTRATOR', 'OWNER', 'RESTRICTED']:
-                report += f"[{b_type}] {cname}: {status} ✅\n"
+            # FIX 2: Filter to ONLY show Joined/Admin status
+            if m.status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER, ChatMember.RESTRICTED]:
+                report += f"[{b_type}] {cname}: {m.status.upper()} ✅\n"
                 found_any = True
-            else:
-                report += f"[{b_type}] {cname}: {status}\n"
-        except TelegramError as e:
-            report += f"[{b_type}] {cname}: Error ({str(e)})\n"
+            # We purposely do NOT log "LEFT", "KICKED" or "Not Found"
+        except TelegramError:
+            pass
             
     if not found_any:
         report += "User not found in any connected batches.\n"
 
     f = io.BytesIO(report.encode("utf-8"))
     f.name = f"user_scan_{target_id}.txt"
-    await update.message.reply_document(document=f, caption=f"🔍 Deep Scan Result for {target_id}")
+    await update.message.reply_document(document=f, caption=f"🔍 Deep Scan Result for {target_id} (Joined Only)")
     await context.bot.delete_message(update.effective_chat.id, msg.message_id)
     await schedule_delete(context, update.message)
 
@@ -701,6 +705,14 @@ async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
+    
+    # NEW: Passive Discovery - If message comes from a group, ensure it's in DB
+    if chat.type in [ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL]:
+        if chat.id not in DB["ALL_CHATS"]:
+            DB["ALL_CHATS"][chat.id] = chat.title or f"Chat {chat.id}"
+            await save_data_async()
+            logger.info(f"✅ Discovered new connected chat: {chat.title}")
+
     if not user: return 
 
     if await wizard_message(update, context): return
@@ -982,7 +994,7 @@ def main():
     
     if app.job_queue: app.job_queue.run_repeating(check_demos, interval=60, first=10)
     
-    print("Bot v9.6 All-Scan Edition Started...")
+    print("Bot v9.7 All-Scan Edition Started...")
     app.run_polling()
 
 if __name__ == "__main__":
