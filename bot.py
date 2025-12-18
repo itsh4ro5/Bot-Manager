@@ -1,19 +1,18 @@
 # -*- coding: utf-8 -*-
 
 """
-ULTIMATE BOT MANAGER (v11.3 - Final Logic)
-Logic Explained:
-1. User clicks "Request Access".
-2. Bot generates a Link (Creates Join Request).
-3. Bot sends this link to User AND to the Admin Support Topic.
-4. User clicks Join -> Request appears in Channel -> Bot detects usage -> Bot REVOKES link immediately (making it one-time).
-5. Admin sees the message in Topic, clicks the command (/demo ...), and Bot approves the pending request using User ID.
+ULTIMATE BOT MANAGER (v11.4 - UI & Logic Fixes)
+Fixes Implemented:
+1. FIXED: Link sent to user is now CLICKABLE (Removed markdown code block).
+2. FIXED: Admin Notification now shows BATCH NAME instead of ID.
+3. FIXED: Approval Commands (/demo, /per) logic improved to handle links better.
+4. RETAINED: Auto-Revoke logic (Required for security, does not affect pending requests).
 
-FEATURES:
-- Manual Approval Workflow.
-- Auto-Revoke (One-Time Link Simulation).
-- Auto-Post to Admin Topic.
-- Strict 3-Hour Demo Timer.
+Workflow:
+1. User clicks "Request Access".
+2. Bot checks Mandatory Channel.
+3. Bot generates Link -> Sends CLICKABLE Link to User -> Auto-sends to Support Topic with NAME.
+4. Admin uses /demo <link> -> Bot approves Pending Request -> Bot Starts Timer.
 """
 
 import logging
@@ -51,7 +50,7 @@ try:
         port = int(os.environ.get("PORT", "8080"))
         app = Flask(__name__)
         @app.route('/')
-        def index(): return "Bot Running - v11.3 Final", 200
+        def index(): return "Bot Running - v11.4 Final Fixes", 200
         
         def run():
             app.run(host="0.0.0.0", port=port, use_reloader=False)
@@ -569,16 +568,17 @@ async def cmd_approve_demo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ Could not identify the user of this topic.")
         return
 
-    # Extract Link
+    # Extract Link - Improved cleaning
     try:
-        link = context.args[0]
+        raw_link = context.args[0]
+        link = raw_link.strip() # Remove spaces/newlines
     except:
         await msg.reply_text("Usage: `/demo <invite_link>`")
         return
 
     # Validate Link
     if link not in DB["LINK_MAP"]:
-        await msg.reply_text("❌ Unknown Link. Ensure user generated it via this Bot.")
+        await msg.reply_text("❌ Unknown Link. Ensure you copied it exactly from the bot's message.")
         return
     
     batch_id = DB["LINK_MAP"][link]
@@ -591,8 +591,8 @@ async def cmd_approve_demo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # We don't block admin, just warn.
 
     try:
-        # APPROVE JOIN REQUEST
-        await context.bot.approve_chat_join_request(batch_id, target_uid)
+        # APPROVE JOIN REQUEST (Safe even if link is revoked)
+        await context.bot.approve_chat_join_request(chat_id=batch_id, user_id=target_uid)
         
         # START TIMER
         expiry = time.time() + (3 * 3600)
@@ -612,7 +612,7 @@ async def cmd_approve_demo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except: pass
 
     except Exception as e:
-        await msg.reply_text(f"❌ Approval Failed: {e}\n(Is the user actually pending in that chat?)")
+        await msg.reply_text(f"❌ Approval Failed: {e}\n(Tip: Ensure User actually clicked 'Join' and is pending.)")
 
 
 async def cmd_approve_perm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -638,23 +638,24 @@ async def cmd_approve_perm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ Could not identify the user of this topic.")
         return
 
-    # Extract Link
+    # Extract Link - Improved cleaning
     try:
-        link = context.args[0]
+        raw_link = context.args[0]
+        link = raw_link.strip()
     except:
         await msg.reply_text("Usage: `/per <invite_link>`")
         return
 
     # Validate Link
     if link not in DB["LINK_MAP"]:
-        await msg.reply_text("❌ Unknown Link. Ensure user generated it via this Bot.")
+        await msg.reply_text("❌ Unknown Link. Ensure you copied it exactly from the bot's message.")
         return
     
     batch_id = DB["LINK_MAP"][link]
 
     try:
         # APPROVE JOIN REQUEST (No Timer)
-        await context.bot.approve_chat_join_request(batch_id, target_uid)
+        await context.bot.approve_chat_join_request(chat_id=batch_id, user_id=target_uid)
         
         # Ensure we remove any existing demo timer for this batch so they don't get kicked
         if "demos" in DB["USER_DATA"][target_uid] and str(batch_id) in DB["USER_DATA"][target_uid]["demos"]:
@@ -666,7 +667,7 @@ async def cmd_approve_perm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except: pass
 
     except Exception as e:
-        await msg.reply_text(f"❌ Approval Failed: {e}\n(Is the user actually pending in that chat?)")
+        await msg.reply_text(f"❌ Approval Failed: {e}\n(Tip: Ensure User actually clicked 'Join' and is pending.)")
 
 # --- 11. USER DETAILS (SCAN) ---
 # /user [id] (Enhanced - Scans ALL batches)
@@ -1063,6 +1064,7 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif chat.id in DB["PAID_CHANNELS"]:
         # MANUAL APPROVAL FLOW
         # 1. Revoke the link so no one else can use it (Simulates Single-Use)
+        # Note: Pending Request REMAINS VALID even if link is revoked.
         if req.invite_link:
             link_url = req.invite_link.invite_link
             if link_url in DB["LINK_MAP"]:
@@ -1205,11 +1207,10 @@ async def general_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("⚠️ You are already in this channel!", show_alert=True)
             return
 
-        # 3. Generate Single-Use Link (NO 3-BATCH RULE)
+        # 3. Generate Single-Use Link
         await q.answer("🔄 Generating Link...")
         try:
             # Create link: NO member limit (Telegram constraint with join request)
-            # FIXED: REMOVED member_limit to prevent 400 error with creates_join_request
             l = await context.bot.create_chat_invite_link(
                 cid, 
                 creates_join_request=True, 
@@ -1220,17 +1221,20 @@ async def general_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             DB["LINK_MAP"][l.invite_link] = cid
             await save_data_async()
             
+            # Fetch Batch Name for Display
+            batch_name = DB["ALL_CHATS"].get(cid) or DB["PAID_CHANNELS"].get(cid) or f"Batch {cid}"
+
             # 4. AUTO-SEND TO SUPPORT TOPIC
             topic_id = await get_or_create_topic(update.effective_user, context)
             if topic_id:
                 admin_msg = (
                     f"🔔 **NEW ACCESS REQUEST**\n"
                     f"👤 User: {update.effective_user.mention_html()}\n"
-                    f"🆔 Batch: `{cid}`\n"
-                    f"🔗 Link: `{l.invite_link}`\n\n"
+                    f"📂 Batch: <b>{batch_name}</b>\n"
+                    f"🔗 Link: {l.invite_link}\n\n"
                     f"👇 **Action:**\n"
-                    f"`/demo {l.invite_link}` (3 Hrs)\n"
-                    f"`/per {l.invite_link}` (Lifetime)"
+                    f"/demo {l.invite_link}\n"
+                    f"/per {l.invite_link}"
                 )
                 try:
                     await context.bot.send_message(
@@ -1242,14 +1246,15 @@ async def general_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logger.error(f"Failed to auto-send link to topic: {e}")
 
-            # 5. SEND TO USER
+            # 5. SEND TO USER (CLICKABLE)
             msg_text = (
-                f"✅ **Access Link Generated!**\n"
-                f"🔗 Link: `{l.invite_link}`\n\n"
+                f"✅ **Access Link Generated!**\n\n"
+                f"🔗 Link: {l.invite_link}\n\n"
                 f"ℹ️ **Status:** Link has been automatically sent to Admin.\n"
                 f"👉 Click Join and wait for approval."
             )
-            await context.bot.send_message(uid, msg_text, parse_mode=ParseMode.MARKDOWN)
+            # Send without markdown for raw clickable link, or use HTML
+            await context.bot.send_message(uid, msg_text)
             
         except Exception as e:
             await context.bot.send_message(uid, f"❌ Error generating link: {e}")
@@ -1347,7 +1352,7 @@ def main():
     
     if app.job_queue: app.job_queue.run_repeating(check_demos, interval=60, first=10)
     
-    print("Bot v11.3 Revoke Logic Started...")
+    print("Bot v11.4 Final Fixes Started...")
     app.run_polling()
 
 if __name__ == "__main__":
