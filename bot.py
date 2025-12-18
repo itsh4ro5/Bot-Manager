@@ -1,18 +1,17 @@
 # -*- coding: utf-8 -*-
 
 """
-ULTIMATE BOT MANAGER (v10.0 - User Management Edition)
-New Features Added:
-1. /ban & /unban: Block/Unblock users from using the bot.
-2. /find: Search User ID by Username.
-3. /extend: Add extra time to a user's running demo.
-4. /kick: Manually remove a user from a specific batch.
-5. /myinfo: Users can check their own demo expiry status.
+ULTIMATE BOT MANAGER (v11.1 - Smart Request Workflow)
+Changes:
+1. REMOVED: Minimum 3 Batches Rule.
+2. KEPT: Mandatory Channel Join Check.
+3. NEW: Auto-Forward Link to Admin Topic (User doesn't need to copy-paste).
 
-EXISTING FEATURES:
-- Passive Discovery, Deep User Scan, Demo Error Logs.
-- Owner/Admin Commands, Backup, Stats.
-- Auto-approve, Pre-link checks, Mongodb/Local JSON.
+Workflow:
+1. User clicks "Request Access".
+2. Bot checks Mandatory Channel.
+3. Bot generates Link -> Sends to User -> Auto-sends to Support Topic.
+4. Admin sees link in topic -> uses /demo or /per.
 """
 
 import logging
@@ -22,6 +21,7 @@ import io
 import asyncio
 import time
 import threading
+import re
 from datetime import datetime, timedelta
 from telegram import (
     Update, ChatMember, InlineKeyboardButton, InlineKeyboardMarkup, 
@@ -49,7 +49,7 @@ try:
         port = int(os.environ.get("PORT", "8080"))
         app = Flask(__name__)
         @app.route('/')
-        def index(): return "Bot Running - v10.0 Management", 200
+        def index(): return "Bot Running - v11.1 Smart Request", 200
         
         def run():
             app.run(host="0.0.0.0", port=port, use_reloader=False)
@@ -84,11 +84,12 @@ DB = {
     "ADMIN_IDS": [],
     "FREE_CHANNELS": {},
     "PAID_CHANNELS": {},
-    "ALL_CHATS": {},     # Track ALL chats bot is in
-    "USER_DATA": {},
+    "ALL_CHATS": {},     
+    "USER_DATA": {},     # Structure: {uid: {name, username, demos: {}, demo_history: []}}
     "BLOCKED_USERS": [],
     "USER_TOPICS": {}, 
-    "PENDING_REQUESTS": {} 
+    "PENDING_REQUESTS": {},
+    "LINK_MAP": {}       # Maps InviteLink -> BatchID
 }
 
 # Runtime Memory
@@ -132,6 +133,7 @@ def load_data():
                 
                 if "ADMIN_IDS" in loaded: DB["ADMIN_IDS"] = loaded["ADMIN_IDS"]
                 if "BLOCKED_USERS" in loaded: DB["BLOCKED_USERS"] = loaded["BLOCKED_USERS"]
+                if "LINK_MAP" in loaded: DB["LINK_MAP"] = loaded["LINK_MAP"]
                 
                 if OWNER_ID not in DB["ADMIN_IDS"]: DB["ADMIN_IDS"].append(OWNER_ID)
                 
@@ -156,6 +158,8 @@ def load_data():
             loaded = json.load(f)
             if "ADMIN_IDS" in loaded: DB["ADMIN_IDS"] = loaded["ADMIN_IDS"]
             if "BLOCKED_USERS" in loaded: DB["BLOCKED_USERS"] = loaded["BLOCKED_USERS"]
+            if "LINK_MAP" in loaded: DB["LINK_MAP"] = loaded["LINK_MAP"]
+            
             for k in ["FREE_CHANNELS", "PAID_CHANNELS", "ALL_CHATS", "USER_TOPICS", "USER_DATA", "PENDING_REQUESTS"]:
                 if k in loaded:
                     DB[k] = {int(i): v for i, v in loaded[k].items()}
@@ -177,6 +181,7 @@ def save_data_sync():
         to_save = {
             "ADMIN_IDS": DB["ADMIN_IDS"],
             "BLOCKED_USERS": DB["BLOCKED_USERS"],
+            "LINK_MAP": DB["LINK_MAP"],
             "FREE_CHANNELS": {str(k): v for k, v in DB["FREE_CHANNELS"].items()},
             "PAID_CHANNELS": {str(k): v for k, v in DB["PAID_CHANNELS"].items()},
             "ALL_CHATS": {str(k): v for k, v in DB["ALL_CHATS"].items()},
@@ -216,7 +221,7 @@ async def check_membership(user_id, context):
     try:
         m = await context.bot.get_chat_member(MANDATORY_CHANNEL_ID, user_id)
         return m.status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]
-    except: return True
+    except: return False
 
 async def is_already_in_channel(context, chat_id, user_id):
     """Checks if user is ALREADY in the target batch."""
@@ -530,8 +535,138 @@ async def cmd_myinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         txt += "\nNo active demos running."
         
-    await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
+    # FIX: Handle both Command and CallbackQuery
+    if update.callback_query:
+        await context.bot.send_message(uid, txt, parse_mode=ParseMode.MARKDOWN)
+        await update.callback_query.answer()
+    elif update.message:
+        await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
 
+# --- 10. MANUAL APPROVAL SYSTEM (NEW) ---
+
+async def cmd_approve_demo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Approves a user for a 3-HOUR DEMO based on the Invite Link provided.
+    Usage: /demo <invite_link> (Must be sent in User's Topic)
+    """
+    if not is_admin(update.effective_user.id): return
+    
+    # Check if inside a topic
+    msg = update.message
+    if not msg.message_thread_id:
+        await msg.reply_text("❌ This command only works inside a User Ticket/Topic.")
+        return
+
+    # Extract User ID from Topic Map
+    topic_id = msg.message_thread_id
+    target_uid = None
+    for u, t in DB["USER_TOPICS"].items():
+        if t == topic_id: target_uid = int(u); break
+    
+    if not target_uid:
+        await msg.reply_text("❌ Could not identify the user of this topic.")
+        return
+
+    # Extract Link
+    try:
+        link = context.args[0]
+    except:
+        await msg.reply_text("Usage: `/demo <invite_link>`")
+        return
+
+    # Validate Link
+    if link not in DB["LINK_MAP"]:
+        await msg.reply_text("❌ Unknown Link. Ensure user generated it via this Bot.")
+        return
+    
+    batch_id = DB["LINK_MAP"][link]
+    
+    # Strict Rule: Check Demo History
+    user_data = DB["USER_DATA"].get(target_uid, {})
+    demo_hist = user_data.get("demo_history", [])
+    if batch_id in demo_hist:
+        await msg.reply_text("⚠️ **Warning:** User has ALREADY used a demo for this batch.\nTo approve anyway, ignore this.")
+        # We don't block admin, just warn.
+
+    try:
+        # APPROVE JOIN REQUEST
+        await context.bot.approve_chat_join_request(batch_id, target_uid)
+        
+        # START TIMER
+        expiry = time.time() + (3 * 3600)
+        
+        if "demos" not in DB["USER_DATA"][target_uid]: DB["USER_DATA"][target_uid]["demos"] = {}
+        DB["USER_DATA"][target_uid]["demos"][str(batch_id)] = expiry
+        
+        # UPDATE HISTORY
+        if "demo_history" not in DB["USER_DATA"][target_uid]: DB["USER_DATA"][target_uid]["demo_history"] = []
+        if batch_id not in DB["USER_DATA"][target_uid]["demo_history"]:
+            DB["USER_DATA"][target_uid]["demo_history"].append(batch_id)
+        
+        await save_data_async()
+        
+        await msg.reply_text(f"✅ **APPROVED (DEMO)**\nUser `{target_uid}` added to Batch `{batch_id}` for 3 Hours.")
+        try: await context.bot.send_message(target_uid, "✅ **Request Approved!**\nDemo Started (3 Hours).")
+        except: pass
+
+    except Exception as e:
+        await msg.reply_text(f"❌ Approval Failed: {e}\n(Is the user actually pending in that chat?)")
+
+
+async def cmd_approve_perm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Approves a user PERMANENTLY based on the Invite Link provided.
+    Usage: /per <invite_link> (Must be sent in User's Topic)
+    """
+    if not is_admin(update.effective_user.id): return
+    
+    # Check if inside a topic
+    msg = update.message
+    if not msg.message_thread_id:
+        await msg.reply_text("❌ This command only works inside a User Ticket/Topic.")
+        return
+
+    # Extract User ID from Topic Map
+    topic_id = msg.message_thread_id
+    target_uid = None
+    for u, t in DB["USER_TOPICS"].items():
+        if t == topic_id: target_uid = int(u); break
+    
+    if not target_uid:
+        await msg.reply_text("❌ Could not identify the user of this topic.")
+        return
+
+    # Extract Link
+    try:
+        link = context.args[0]
+    except:
+        await msg.reply_text("Usage: `/per <invite_link>`")
+        return
+
+    # Validate Link
+    if link not in DB["LINK_MAP"]:
+        await msg.reply_text("❌ Unknown Link. Ensure user generated it via this Bot.")
+        return
+    
+    batch_id = DB["LINK_MAP"][link]
+
+    try:
+        # APPROVE JOIN REQUEST (No Timer)
+        await context.bot.approve_chat_join_request(batch_id, target_uid)
+        
+        # Ensure we remove any existing demo timer for this batch so they don't get kicked
+        if "demos" in DB["USER_DATA"][target_uid] and str(batch_id) in DB["USER_DATA"][target_uid]["demos"]:
+            del DB["USER_DATA"][target_uid]["demos"][str(batch_id)]
+            await save_data_async()
+            
+        await msg.reply_text(f"✅ **APPROVED (PERMANENT)**\nUser `{target_uid}` added to Batch `{batch_id}` permanently.")
+        try: await context.bot.send_message(target_uid, "💎 **Request Approved!**\nYou have Permanent Access.")
+        except: pass
+
+    except Exception as e:
+        await msg.reply_text(f"❌ Approval Failed: {e}\n(Is the user actually pending in that chat?)")
+
+# --- 11. USER DETAILS (SCAN) ---
 # /user [id] (Enhanced - Scans ALL batches)
 async def cmd_user_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
@@ -581,6 +716,12 @@ async def cmd_user_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     if not found_any:
         report += "User not found in any connected batches.\n"
+
+    # Show History
+    if info and "demo_history" in info:
+        report += "\n--- DEMO HISTORY (USED) ---\n"
+        for hid in info["demo_history"]:
+             report += f"• {hid}\n"
 
     f = io.BytesIO(report.encode("utf-8"))
     f.name = f"user_scan_{target_id}.txt"
@@ -675,7 +816,7 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await schedule_delete(context, update.message)
     await schedule_delete(context, msg)
 
-# --- 9. WIZARD SYSTEM ---
+# --- 12. WIZARD SYSTEM ---
 
 async def cmd_addbatch_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
@@ -735,7 +876,7 @@ async def wizard_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return True
     return False
 
-# --- 10. BROADCAST SYSTEM ---
+# --- 13. BROADCAST SYSTEM ---
 
 async def cmd_broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
@@ -806,7 +947,7 @@ async def broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
         del BROADCAST_STATE[uid]
 
-# --- 11. SYNC & MESSAGE HANDLER ---
+# --- 14. SYNC & MESSAGE HANDLER ---
 
 async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message_reaction: return
@@ -889,25 +1030,24 @@ async def main_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 await context.bot.send_message(SUPPORT_GROUP_ID, "❌ User has blocked the bot.", message_thread_id=topic_id)
             except: pass
 
-# --- 12. JOIN & DEMO ---
+# --- 15. JOIN & DEMO LOGIC (MODIFIED) ---
 
 async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handles Join Requests for Free & Paid Batches.
-    Auto-approves Free Batches IF Mandatory Channel is joined.
+    - Free: Auto-approves if Mandatory Channel is joined.
+    - Paid: NO AUTO APPROVE. Wait for Admin command.
     """
     req = update.chat_join_request
     chat = req.chat
     user = req.from_user
     
-    # NEW: Block check
     if user.id in DB["BLOCKED_USERS"]:
         try: await context.bot.decline_chat_join_request(chat.id, user.id)
         except: pass
         return
     
     if chat.id in DB["FREE_CHANNELS"]:
-        # Check Mandatory Membership
         if await check_membership(user.id, context):
             try:
                 await context.bot.approve_chat_join_request(chat.id, user.id)
@@ -919,27 +1059,13 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await context.bot.decline_chat_join_request(chat.id, user.id)
             except: pass
     elif chat.id in DB["PAID_CHANNELS"]:
-        # Paid batches require manual admin approval
+        # MANUAL APPROVAL: Do Nothing. Admin will approve via /demo or /per in Support Topic.
         pass
 
 async def on_join_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cm = update.chat_member
-    if not cm: return
-    user = cm.from_user
-    chat = cm.chat
-    
-    if cm.new_chat_member.status == ChatMember.MEMBER and cm.old_chat_member.status != ChatMember.MEMBER:
-        if user.id in DB["PENDING_REQUESTS"] and DB["PENDING_REQUESTS"][user.id] == chat.id:
-            try: await context.bot.send_message(user.id, "✅ **Request Approved!**\nDemo Started.")
-            except: pass
-            
-            expiry = time.time() + (3 * 3600)
-            if "demos" not in DB["USER_DATA"][user.id]: DB["USER_DATA"][user.id]["demos"] = {}
-            DB["USER_DATA"][user.id]["demos"][str(chat.id)] = expiry
-            logger.info(f"⏱ Demo started for {user.id} in {chat.id}. Expires: {expiry}")
-            
-            del DB["PENDING_REQUESTS"][user.id]
-            await save_data_async()
+    # This function logs when a user actually joins.
+    # Logic for starting timers is now moved to cmd_approve_demo.
+    pass
 
 async def check_demos(context: ContextTypes.DEFAULT_TYPE):
     """
@@ -966,7 +1092,6 @@ async def check_demos(context: ContextTypes.DEFAULT_TYPE):
                 
                 try:
                     # 1. Attempt to Ban (Kick)
-                    # We use ban then unban to kick without permanent ban
                     await context.bot.ban_chat_member(chat_id, user_id)
                     logger.info(f"✅ User {user_id} kicked from {chat_id}")
                     
@@ -977,7 +1102,7 @@ async def check_demos(context: ContextTypes.DEFAULT_TYPE):
                     try:
                         await context.bot.send_message(user_id, "⏰ **Demo Ended.**\nHope you enjoyed! Contact Admin for permanent access.")
                     except Exception:
-                        pass # User might have blocked bot
+                        pass 
                         
                 except Exception as e:
                     logger.error(f"❌ KICK FAILED for {user_id} in {chat_id}: {e}")
@@ -994,9 +1119,7 @@ async def check_demos(context: ContextTypes.DEFAULT_TYPE):
                             await context.bot.send_message(LOG_CHANNEL_ID, err_msg, parse_mode=ParseMode.MARKDOWN)
                         except: pass
                 
-                # 4. Remove from database regardless of success/failure
-                # If we don't remove, it will loop forever. 
-                # If it failed, the Admin Log above acts as the alert to fix permissions.
+                # 4. Remove from database
                 if bid in data["demos"]:
                     del data["demos"][bid]
                     mod = True
@@ -1004,16 +1127,15 @@ async def check_demos(context: ContextTypes.DEFAULT_TYPE):
     if mod: 
         await save_data_async()
 
-# --- 13. USER UI ---
+# --- 16. USER UI (UPDATED) ---
 
 async def general_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     uid = q.from_user.id
     data = q.data
     
-    # Block Check
     if uid in DB["BLOCKED_USERS"]:
-        await q.answer("🚫 You are blocked from using this bot.", show_alert=True)
+        await q.answer("🚫 You are blocked.", show_alert=True)
         return
 
     if data.startswith("wiz_"): await wizard_callback(update, context); return
@@ -1035,74 +1157,103 @@ async def general_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [[InlineKeyboardButton(f"💎 {n}", callback_data=f"view_p_{i}")] for i, n in DB["PAID_CHANNELS"].items()]
         kb.append([InlineKeyboardButton("🔙 Back", callback_data="u_main")])
         await q.edit_message_text("💎 **Premium Batches:**", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+    elif data == "my_info":
+        await cmd_myinfo(update, context)
+        return
     
     # --- GET FREE BATCH LINK ---
     elif data.startswith("get_f_"):
         cid = int(data.split("_")[2])
-        # PRE-LINK CHECK
         if await is_already_in_channel(context, cid, uid): 
             await q.answer("⚠️ Already Joined!", show_alert=True) 
             return
-        
         try:
             l = await context.bot.create_chat_invite_link(cid, creates_join_request=True, name=f"Free-{uid}")
             await context.bot.send_message(uid, f"🔗 **Link:**\n{l.invite_link}\n\nℹ️ *Request auto-approved.*")
             await q.answer("Sent to DM")
         except: await q.answer("Bot Error", show_alert=True)
 
-    # --- VIEW PAID BATCH OPTIONS ---
+    # --- VIEW PAID BATCH OPTIONS (Consolidated) ---
     elif data.startswith("view_p_"):
         cid = int(data.split("_")[2])
-        kb = [[InlineKeyboardButton("🕒 3hr Demo", callback_data=f"req_d_{cid}")],
-              [InlineKeyboardButton("♾️ Permanent", callback_data=f"req_p_{cid}")],
+        # Only one button now: "Get Access Link"
+        kb = [[InlineKeyboardButton("🔗 Request Access", callback_data=f"req_access_{cid}")],
               [InlineKeyboardButton("🔙 Back", callback_data="u_paid")]]
-        await q.edit_message_text("💎 **Choose Access:**", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+        await q.edit_message_text("💎 **Premium Access:**\nClick below to get a join link.", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
 
-    # --- REQUEST DEMO LINK ---
-    elif data.startswith("req_d_"):
+    # --- REQUEST ACCESS LINK (MANUAL WORKFLOW) ---
+    elif data.startswith("req_access_"):
         cid = int(data.split("_")[2])
-        # PRE-LINK CHECK (Restored)
+        
+        # 1. CHECK MANDATORY MEMBERSHIP (Required)
+        if not await check_membership(uid, context):
+            await q.answer("❌ Join Main Channel First!", show_alert=True)
+            return
+
+        # 2. Already Joined Check
         if await is_already_in_channel(context, cid, uid):
             await q.answer("⚠️ You are already in this channel!", show_alert=True)
             return
+
+        # 3. Generate Single-Use Link (NO 3-BATCH RULE)
+        await q.answer("🔄 Generating Link...")
+        try:
+            # Create link: 1 member limit, creates join request
+            l = await context.bot.create_chat_invite_link(
+                cid, 
+                creates_join_request=True, 
+                member_limit=1,
+                name=f"Req-{uid}"
+            )
             
-        DB["PENDING_REQUESTS"][uid] = cid
-        await save_data_async()
-        try:
-            l = await context.bot.create_chat_invite_link(cid, creates_join_request=True, name=f"Demo-{uid}")
-            await context.bot.send_message(uid, f"⏱ **Demo Link:**\n{l.invite_link}")
-            await q.answer("Sent to DM")
-        except: await q.answer("Bot Error: Check Admin Rights", show_alert=True)
+            # STORE LINK IN DB for Admin Command Lookups
+            DB["LINK_MAP"][l.invite_link] = cid
+            await save_data_async()
+            
+            # 4. AUTO-SEND TO SUPPORT TOPIC
+            topic_id = await get_or_create_topic(update.effective_user, context)
+            if topic_id:
+                admin_msg = (
+                    f"🔔 **NEW ACCESS REQUEST**\n"
+                    f"👤 User: {update.effective_user.mention_html()}\n"
+                    f"🆔 Batch: `{cid}`\n"
+                    f"🔗 Link: `{l.invite_link}`\n\n"
+                    f"👇 **Action:**\n"
+                    f"`/demo {l.invite_link}` (3 Hrs)\n"
+                    f"`/per {l.invite_link}` (Lifetime)"
+                )
+                try:
+                    await context.bot.send_message(
+                        SUPPORT_GROUP_ID, 
+                        admin_msg, 
+                        message_thread_id=topic_id, 
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to auto-send link to topic: {e}")
 
-    # --- REQUEST PERMANENT LINK ---
-    elif data.startswith("req_p_"):
-        cid = int(data.split("_")[2])
-        # PRE-LINK CHECK (Restored)
-        if await is_already_in_channel(context, cid, uid):
-            await q.answer("⚠️ You are already in this channel!", show_alert=True)
-            return
-
-        try:
-            l = await context.bot.create_chat_invite_link(cid, creates_join_request=True, name=f"Perm-{uid}")
-            await context.bot.send_message(uid, f"💎 **Link:**\n{l.invite_link}")
-            await q.answer("Sent to DM")
-        except: await q.answer("Bot Error: Check Admin Rights", show_alert=True)
+            # 5. SEND TO USER
+            msg_text = (
+                f"✅ **Access Link Generated!**\n"
+                f"🔗 Link: `{l.invite_link}`\n\n"
+                f"ℹ️ **Status:** Link has been automatically sent to Admin.\n"
+                f"👉 Click Join and wait for approval."
+            )
+            await context.bot.send_message(uid, msg_text, parse_mode=ParseMode.MARKDOWN)
+            
+        except Exception as e:
+            await context.bot.send_message(uid, f"❌ Error generating link: {e}")
 
 async def show_user_menu(update: Update):
     kb = [[InlineKeyboardButton("📂 Free Batches", callback_data="u_free"), InlineKeyboardButton("💎 Paid Batches", callback_data="u_paid")],
           [InlineKeyboardButton("🆘 Support", url=f"tg://user?id={SUPPORT_GROUP_ID}")],
-          [InlineKeyboardButton("ℹ️ My Info", callback_data="my_info")]] # NEW BUTTON
+          [InlineKeyboardButton("ℹ️ My Info", callback_data="my_info")]]
     txt = "👋 **Welcome!**\nChoose an option:"
     
-    # Handle my_info callback specifically
-    if update.callback_query and update.callback_query.data == "my_info":
-        await cmd_myinfo(update, None) # Reuse logic
-        return
-
     if update.callback_query: await update.callback_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
     else: await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
 
-# --- 14. MAIN ---
+# --- 17. MAIN ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -1119,45 +1270,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id == OWNER_ID:
         await update.message.reply_text(
             f"👑 **WELCOME BOSS!**\n"
-            f"You have full system access.\n\n"
-            f"**⚙️ Owner Commands:**\n"
-            f"`/addadmin [id]` - Add new admin\n"
-            f"`/deladmin [id]` - Remove admin\n"
-            f"`/backup` - Download data backup\n"
-            f"`/allusers` - Get list of all users\n\n"
-            f"**🛠 User Management:**\n"
-            f"`/find [username]` - Find user ID\n"
-            f"`/ban [id]` - Block user from bot\n"
-            f"`/unban [id]` - Unblock user\n"
-            f"`/kick [id] [batch]` - Remove user\n"
-            f"`/extend [id] [batch] [hrs]` - Add demo time\n\n"
-            f"**📊 Admin Tools:**\n"
-            f"`/stats` - View Bot Statistics\n"
-            f"`/addbatch` - Create New Batch\n"
-            f"`/delbatch` - Delete Batch\n"
-            f"`/broadcast` - Send Msg to All Users\n"
-            f"`/post` - Post to All Channels\n"
-            f"`/user [id]` - Check User Info\n"
-            f"`/batches` - List Connected Batches\n"
-            f"`/cancel` - Stop Current Action",
+            f"**⚙️ Owner:** `/addadmin`, `/deladmin`, `/backup`, `/allusers`\n"
+            f"**🛠 Manage:** `/find`, `/ban`, `/unban`, `/kick`, `/extend`\n"
+            f"**✅ Approve:** `/demo <link>`, `/per <link>`\n"
+            f"**📊 Tools:** `/stats`, `/batches`, `/broadcast`",
             parse_mode=ParseMode.MARKDOWN
         )
     # 2. ADMIN VIEW
     elif is_admin(user.id):
         await update.message.reply_text(
             f"👮‍♂️ **WELCOME ADMIN!**\n"
-            f"Here are your management tools.\n\n"
-            f"**🛠 User Management:**\n"
-            f"`/find [username]` - Find user ID\n"
-            f"`/ban [id]` - Block user from bot\n"
-            f"`/unban [id]` - Unblock user\n"
-            f"`/kick [id] [batch]` - Remove user\n"
-            f"`/extend [id] [batch] [hrs]` - Add demo time\n\n"
-            f"**📊 Tools:**\n"
-            f"`/stats`, `/user`, `/batches`\n"
-            f"`/addbatch`, `/delbatch`\n"
-            f"`/broadcast`, `/post`\n\n"
-            f"⚠️ *Note: You cannot add/remove other admins.*",
+            f"**🛠 Manage:** `/find`, `/ban`, `/unban`, `/kick`, `/extend`\n"
+            f"**✅ Approve:** `/demo <link>`, `/per <link>`\n"
+            f"**📊 Tools:** `/stats`, `/batches`, `/broadcast`",
             parse_mode=ParseMode.MARKDOWN
         )
     # 3. USER VIEW
@@ -1181,13 +1306,17 @@ def main():
     app.add_handler(CommandHandler("backup", cmd_backup))
     app.add_handler(CommandHandler("allusers", cmd_all_users))
     
-    # New Commands
+    # User Mgmt
     app.add_handler(CommandHandler("ban", cmd_ban))
     app.add_handler(CommandHandler("unban", cmd_unban))
     app.add_handler(CommandHandler("find", cmd_find_user))
     app.add_handler(CommandHandler("extend", cmd_extend_demo))
     app.add_handler(CommandHandler("kick", cmd_kick_user))
     app.add_handler(CommandHandler("myinfo", cmd_myinfo))
+    
+    # Approval
+    app.add_handler(CommandHandler("demo", cmd_approve_demo))
+    app.add_handler(CommandHandler("per", cmd_approve_perm))
     
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("user", cmd_user_details))
@@ -1208,7 +1337,7 @@ def main():
     
     if app.job_queue: app.job_queue.run_repeating(check_demos, interval=60, first=10)
     
-    print("Bot v10.0 Management Edition Started...")
+    print("Bot v11.1 Smart Request Started...")
     app.run_polling()
 
 if __name__ == "__main__":
