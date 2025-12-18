@@ -1,17 +1,19 @@
 # -*- coding: utf-8 -*-
 
 """
-ULTIMATE BOT MANAGER (v11.1 - Smart Request Workflow)
-Changes:
-1. REMOVED: Minimum 3 Batches Rule.
-2. KEPT: Mandatory Channel Join Check.
-3. NEW: Auto-Forward Link to Admin Topic (User doesn't need to copy-paste).
-
-Workflow:
+ULTIMATE BOT MANAGER (v11.3 - Final Logic)
+Logic Explained:
 1. User clicks "Request Access".
-2. Bot checks Mandatory Channel.
-3. Bot generates Link -> Sends to User -> Auto-sends to Support Topic.
-4. Admin sees link in topic -> uses /demo or /per.
+2. Bot generates a Link (Creates Join Request).
+3. Bot sends this link to User AND to the Admin Support Topic.
+4. User clicks Join -> Request appears in Channel -> Bot detects usage -> Bot REVOKES link immediately (making it one-time).
+5. Admin sees the message in Topic, clicks the command (/demo ...), and Bot approves the pending request using User ID.
+
+FEATURES:
+- Manual Approval Workflow.
+- Auto-Revoke (One-Time Link Simulation).
+- Auto-Post to Admin Topic.
+- Strict 3-Hour Demo Timer.
 """
 
 import logging
@@ -49,7 +51,7 @@ try:
         port = int(os.environ.get("PORT", "8080"))
         app = Flask(__name__)
         @app.route('/')
-        def index(): return "Bot Running - v11.1 Smart Request", 200
+        def index(): return "Bot Running - v11.3 Final", 200
         
         def run():
             app.run(host="0.0.0.0", port=port, use_reloader=False)
@@ -1059,8 +1061,16 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await context.bot.decline_chat_join_request(chat.id, user.id)
             except: pass
     elif chat.id in DB["PAID_CHANNELS"]:
-        # MANUAL APPROVAL: Do Nothing. Admin will approve via /demo or /per in Support Topic.
-        pass
+        # MANUAL APPROVAL FLOW
+        # 1. Revoke the link so no one else can use it (Simulates Single-Use)
+        if req.invite_link:
+            link_url = req.invite_link.invite_link
+            if link_url in DB["LINK_MAP"]:
+                try:
+                    await context.bot.revoke_chat_invite_link(chat.id, link_url)
+                    logger.info(f"Revoked one-time link: {link_url}")
+                except Exception as e:
+                    logger.error(f"Failed to revoke link: {e}")
 
 async def on_join_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # This function logs when a user actually joins.
@@ -1198,12 +1208,12 @@ async def general_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 3. Generate Single-Use Link (NO 3-BATCH RULE)
         await q.answer("🔄 Generating Link...")
         try:
-            # Create link: 1 member limit, creates join request
+            # Create link: NO member limit (Telegram constraint with join request)
+            # FIXED: REMOVED member_limit to prevent 400 error with creates_join_request
             l = await context.bot.create_chat_invite_link(
                 cid, 
                 creates_join_request=True, 
-                member_limit=1,
-                name=f"Req-{uid}"
+                name=f"Req-{uid}-{int(time.time())}" # Add timestamp to ensure unique
             )
             
             # STORE LINK IN DB for Admin Command Lookups
@@ -1337,7 +1347,7 @@ def main():
     
     if app.job_queue: app.job_queue.run_repeating(check_demos, interval=60, first=10)
     
-    print("Bot v11.1 Smart Request Started...")
+    print("Bot v11.3 Revoke Logic Started...")
     app.run_polling()
 
 if __name__ == "__main__":
