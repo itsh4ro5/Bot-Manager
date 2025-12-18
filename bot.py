@@ -1,35 +1,18 @@
 # -*- coding: utf-8 -*-
 
 """
-ULTIMATE BOT MANAGER (v9.8 - Fixes & Enhanced Logging)
-Fixes Implemented:
-1. /batches: Shows ALL connected chats (Passive Discovery added).
-2. /user: Only lists chats where user is ACTUALLY joined (Filters out 'Left'/'Kicked').
-3. FIXED: Demo Expiry Logic - Now logs errors and alerts admins if kicking fails.
+ULTIMATE BOT MANAGER (v10.0 - User Management Edition)
+New Features Added:
+1. /ban & /unban: Block/Unblock users from using the bot.
+2. /find: Search User ID by Username.
+3. /extend: Add extra time to a user's running demo.
+4. /kick: Manually remove a user from a specific batch.
+5. /myinfo: Users can check their own demo expiry status.
 
-FEATURES INCLUDED:
-1.  Owner Commands: /addadmin, /deladmin, /backup, /allusers
-2.  Admin Commands: /stats, /user, /addbatch, /delbatch, /broadcast, /post, /cancel
-    **NEW:** /batches (List all connected chats/batches)
-3.  User Features: 
-    - Professional Welcome (Separate for Owner/Admin/User)
-    - Free/Paid Batches Menus
-    - Ticket Support System
-4.  Automation:
-    - 3-Hour Demo Timer (Restart Proof & Error Logs)
-    - Auto-Kick on Expiry
-    - Smart Topic Creation (No Duplicates)
-    - History Search Link in Tickets
-    - Admin Command Auto-Deletion (20 mins)
-    - Bidirectional Message Edit & Reaction Sync
-    - Auto-Detect Batch Name from Channel ID
-    - **Pre-Link Membership Check** (Checks if user is already in channel before sending link)
-    - **Auto-Approve Free Batches** (Only if Mandatory Channel Joined)
-    - **Deep User Scan** (Checks all known batches, filters only joined ones)
-    - **Auto-Track Bot Membership** (Saves any chat bot is added to or active in)
-5.  Persistence:
-    - MongoDB Support (Critical for remembering Topics after redeploy)
-    - Local JSON Fallback
+EXISTING FEATURES:
+- Passive Discovery, Deep User Scan, Demo Error Logs.
+- Owner/Admin Commands, Backup, Stats.
+- Auto-approve, Pre-link checks, Mongodb/Local JSON.
 """
 
 import logging
@@ -39,7 +22,7 @@ import io
 import asyncio
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import (
     Update, ChatMember, InlineKeyboardButton, InlineKeyboardMarkup, 
     BotCommandScopeChat, ChatJoinRequest
@@ -66,7 +49,7 @@ try:
         port = int(os.environ.get("PORT", "8080"))
         app = Flask(__name__)
         @app.route('/')
-        def index(): return "Bot Running - v9.8 Fixed", 200
+        def index(): return "Bot Running - v10.0 Management", 200
         
         def run():
             app.run(host="0.0.0.0", port=port, use_reloader=False)
@@ -410,6 +393,145 @@ async def cmd_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.delete_message(update.effective_chat.id, msg.message_id)
     await schedule_delete(context, update.message)
 
+# --- 9. NEW MANAGEMENT COMMANDS ---
+
+async def cmd_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    try:
+        target = int(context.args[0])
+        if target not in DB["BLOCKED_USERS"] and target != OWNER_ID:
+            DB["BLOCKED_USERS"].append(target)
+            await save_data_async()
+            msg = await update.message.reply_text(f"🚫 User {target} has been BLOCKED.")
+        else: msg = await update.message.reply_text("⚠️ User already blocked or is Owner.")
+    except: msg = await update.message.reply_text("Usage: /ban [user_id]")
+    await schedule_delete(context, update.message)
+    await schedule_delete(context, msg)
+
+async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    try:
+        target = int(context.args[0])
+        if target in DB["BLOCKED_USERS"]:
+            DB["BLOCKED_USERS"].remove(target)
+            await save_data_async()
+            msg = await update.message.reply_text(f"✅ User {target} has been UNBLOCKED.")
+        else: msg = await update.message.reply_text("⚠️ User is not blocked.")
+    except: msg = await update.message.reply_text("Usage: /unban [user_id]")
+    await schedule_delete(context, update.message)
+    await schedule_delete(context, msg)
+
+async def cmd_find_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    try:
+        query = context.args[0].replace("@", "").lower()
+    except: 
+        msg = await update.message.reply_text("Usage: /find [username]")
+        await schedule_delete(context, msg)
+        return
+
+    found = []
+    for uid, data in DB["USER_DATA"].items():
+        u_name = data.get("username", "")
+        if u_name and query in u_name.lower():
+            found.append(f"🆔 `{uid}` | Name: {data.get('name')} | @{u_name}")
+            
+    if found:
+        text = "🔍 **Found Users:**\n\n" + "\n".join(found)
+        msg = await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    else:
+        msg = await update.message.reply_text("❌ No user found with that username.")
+    await schedule_delete(context, update.message)
+    await schedule_delete(context, msg)
+
+async def cmd_extend_demo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    try:
+        uid = int(context.args[0])
+        bid = str(context.args[1]) # Batch ID as string for Dict key
+        hours = float(context.args[2])
+    except:
+        msg = await update.message.reply_text("Usage: /extend [user_id] [batch_id] [hours]")
+        await schedule_delete(context, msg)
+        return
+
+    if uid in DB["USER_DATA"] and "demos" in DB["USER_DATA"][uid]:
+        if bid in DB["USER_DATA"][uid]["demos"]:
+            # Add time
+            current_expiry = DB["USER_DATA"][uid]["demos"][bid]
+            # If already expired, start from NOW. Else add to existing.
+            base_time = max(current_expiry, time.time())
+            new_expiry = base_time + (hours * 3600)
+            
+            DB["USER_DATA"][uid]["demos"][bid] = new_expiry
+            await save_data_async()
+            
+            # Notify Admin
+            msg = await update.message.reply_text(f"✅ Extended demo for User {uid} in Batch {bid} by {hours} hrs.")
+            
+            # Notify User
+            try:
+                chat_info = await context.bot.get_chat(int(bid))
+                cname = chat_info.title
+                await context.bot.send_message(uid, f"🎁 **Demo Extended!**\nAdmin added {hours} hours to your access in **{cname}**.")
+            except: pass
+        else:
+            msg = await update.message.reply_text("❌ User does not have an active/expired demo in this batch.")
+    else:
+        msg = await update.message.reply_text("❌ User not found.")
+        
+    await schedule_delete(context, update.message)
+    await schedule_delete(context, msg)
+
+async def cmd_kick_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    try:
+        uid = int(context.args[0])
+        bid = int(context.args[1])
+    except:
+        msg = await update.message.reply_text("Usage: /kick [user_id] [batch_id]")
+        await schedule_delete(context, msg)
+        return
+
+    try:
+        await context.bot.ban_chat_member(bid, uid)
+        await context.bot.unban_chat_member(bid, uid) # Allow rejoin later
+        msg = await update.message.reply_text(f"✅ User {uid} kicked from {bid}.")
+        
+        # Also remove from Demo DB if exists
+        s_bid = str(bid)
+        if uid in DB["USER_DATA"] and "demos" in DB["USER_DATA"][uid] and s_bid in DB["USER_DATA"][uid]["demos"]:
+            del DB["USER_DATA"][uid]["demos"][s_bid]
+            await save_data_async()
+            
+    except Exception as e:
+        msg = await update.message.reply_text(f"❌ Kick Failed: {e}")
+        
+    await schedule_delete(context, update.message)
+    await schedule_delete(context, msg)
+
+async def cmd_myinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    data = DB["USER_DATA"].get(uid, {})
+    
+    txt = f"👤 **MY INFO**\n🆔 ID: `{uid}`\n"
+    
+    if "demos" in data and data["demos"]:
+        txt += "\n⏱ **Active Demos:**\n"
+        now = time.time()
+        for bid, expiry in data["demos"].items():
+            chat_name = DB["ALL_CHATS"].get(int(bid), f"Batch {bid}")
+            remaining = expiry - now
+            if remaining > 0:
+                mins = int(remaining / 60)
+                txt += f"• **{chat_name}**: {mins} mins left\n"
+            else:
+                txt += f"• **{chat_name}**: EXPIRED 🔴\n"
+    else:
+        txt += "\nNo active demos running."
+        
+    await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
+
 # /user [id] (Enhanced - Scans ALL batches)
 async def cmd_user_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
@@ -426,6 +548,10 @@ async def cmd_user_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     report = f"USER DETAILS REPORT: {target_id}\n"
     report += f"Name: {info.get('name') if info else 'Unknown'}\n"
     report += f"Joined Bot: {time.ctime(info.get('joined_at',0)) if info else 'Unknown'}\n\n"
+    
+    if target_id in DB["BLOCKED_USERS"]:
+        report += "🚫 STATUS: BLOCKED FROM BOT\n\n"
+        
     report += "--- BATCH MEMBERSHIP STATUS (JOINED ONLY) ---\n"
     
     # FIX 1: Ensure all keys are captured (Passive discovery relies on DB["ALL_CHATS"] being populated)
@@ -715,6 +841,9 @@ async def main_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             logger.info(f"✅ Discovered new connected chat: {chat.title}")
 
     if not user: return 
+    
+    # NEW: BLOCK CHECK
+    if user.id in DB["BLOCKED_USERS"]: return
 
     if await wizard_message(update, context): return
     if await handle_broadcast_flow(update, context): return
@@ -770,6 +899,12 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
     req = update.chat_join_request
     chat = req.chat
     user = req.from_user
+    
+    # NEW: Block check
+    if user.id in DB["BLOCKED_USERS"]:
+        try: await context.bot.decline_chat_join_request(chat.id, user.id)
+        except: pass
+        return
     
     if chat.id in DB["FREE_CHANNELS"]:
         # Check Mandatory Membership
@@ -875,6 +1010,11 @@ async def general_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     uid = q.from_user.id
     data = q.data
+    
+    # Block Check
+    if uid in DB["BLOCKED_USERS"]:
+        await q.answer("🚫 You are blocked from using this bot.", show_alert=True)
+        return
 
     if data.startswith("wiz_"): await wizard_callback(update, context); return
     if data.startswith("bc_"): await broadcast_callback(update, context); return
@@ -950,8 +1090,15 @@ async def general_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_user_menu(update: Update):
     kb = [[InlineKeyboardButton("📂 Free Batches", callback_data="u_free"), InlineKeyboardButton("💎 Paid Batches", callback_data="u_paid")],
-          [InlineKeyboardButton("🆘 Support", url=f"tg://user?id={SUPPORT_GROUP_ID}")]]
+          [InlineKeyboardButton("🆘 Support", url=f"tg://user?id={SUPPORT_GROUP_ID}")],
+          [InlineKeyboardButton("ℹ️ My Info", callback_data="my_info")]] # NEW BUTTON
     txt = "👋 **Welcome!**\nChoose an option:"
+    
+    # Handle my_info callback specifically
+    if update.callback_query and update.callback_query.data == "my_info":
+        await cmd_myinfo(update, None) # Reuse logic
+        return
+
     if update.callback_query: await update.callback_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
     else: await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
 
@@ -959,7 +1106,10 @@ async def show_user_menu(update: Update):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if user.id in DB["BLOCKED_USERS"]: return
+    if user.id in DB["BLOCKED_USERS"]: 
+        await update.message.reply_text("🚫 You are blocked.")
+        return
+        
     if user.id not in DB["USER_DATA"]:
         DB["USER_DATA"][user.id] = {"name": user.full_name, "username": user.username, "joined_at": time.time(), "demos": {}}
         await save_data_async()
@@ -975,14 +1125,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"`/deladmin [id]` - Remove admin\n"
             f"`/backup` - Download data backup\n"
             f"`/allusers` - Get list of all users\n\n"
-            f"**🛠 Admin Tools:**\n"
+            f"**🛠 User Management:**\n"
+            f"`/find [username]` - Find user ID\n"
+            f"`/ban [id]` - Block user from bot\n"
+            f"`/unban [id]` - Unblock user\n"
+            f"`/kick [id] [batch]` - Remove user\n"
+            f"`/extend [id] [batch] [hrs]` - Add demo time\n\n"
+            f"**📊 Admin Tools:**\n"
             f"`/stats` - View Bot Statistics\n"
             f"`/addbatch` - Create New Batch\n"
             f"`/delbatch` - Delete Batch\n"
             f"`/broadcast` - Send Msg to All Users\n"
             f"`/post` - Post to All Channels\n"
             f"`/user [id]` - Check User Info\n"
-            f"`/batches` - List Connected Batches (New)\n"
+            f"`/batches` - List Connected Batches\n"
             f"`/cancel` - Stop Current Action",
             parse_mode=ParseMode.MARKDOWN
         )
@@ -991,15 +1147,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"👮‍♂️ **WELCOME ADMIN!**\n"
             f"Here are your management tools.\n\n"
-            f"**🛠 Available Commands:**\n"
-            f"`/stats` - View Bot Statistics\n"
-            f"`/addbatch` - Create New Batch\n"
-            f"`/delbatch` - Delete Batch\n"
-            f"`/broadcast` - Send Msg to All Users\n"
-            f"`/post` - Post to All Channels\n"
-            f"`/user [id]` - Check User Info\n"
-            f"`/batches` - List Connected Batches (New)\n"
-            f"`/cancel` - Stop Current Action\n\n"
+            f"**🛠 User Management:**\n"
+            f"`/find [username]` - Find user ID\n"
+            f"`/ban [id]` - Block user from bot\n"
+            f"`/unban [id]` - Unblock user\n"
+            f"`/kick [id] [batch]` - Remove user\n"
+            f"`/extend [id] [batch] [hrs]` - Add demo time\n\n"
+            f"**📊 Tools:**\n"
+            f"`/stats`, `/user`, `/batches`\n"
+            f"`/addbatch`, `/delbatch`\n"
+            f"`/broadcast`, `/post`\n\n"
             f"⚠️ *Note: You cannot add/remove other admins.*",
             parse_mode=ParseMode.MARKDOWN
         )
@@ -1024,9 +1181,17 @@ def main():
     app.add_handler(CommandHandler("backup", cmd_backup))
     app.add_handler(CommandHandler("allusers", cmd_all_users))
     
+    # New Commands
+    app.add_handler(CommandHandler("ban", cmd_ban))
+    app.add_handler(CommandHandler("unban", cmd_unban))
+    app.add_handler(CommandHandler("find", cmd_find_user))
+    app.add_handler(CommandHandler("extend", cmd_extend_demo))
+    app.add_handler(CommandHandler("kick", cmd_kick_user))
+    app.add_handler(CommandHandler("myinfo", cmd_myinfo))
+    
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("user", cmd_user_details))
-    app.add_handler(CommandHandler("batches", cmd_batches)) # NEW
+    app.add_handler(CommandHandler("batches", cmd_batches))
     app.add_handler(CommandHandler("addbatch", cmd_addbatch_start))
     app.add_handler(CommandHandler("delbatch", cmd_delbatch))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast_start))
@@ -1036,14 +1201,14 @@ def main():
     app.add_handler(CallbackQueryHandler(general_callback))
     app.add_handler(ChatJoinRequestHandler(handle_join_request))
     app.add_handler(ChatMemberHandler(on_join_update, ChatMemberHandler.CHAT_MEMBER))
-    app.add_handler(ChatMemberHandler(track_chats, ChatMemberHandler.MY_CHAT_MEMBER)) # NEW: Auto-track bot
+    app.add_handler(ChatMemberHandler(track_chats, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageReactionHandler(handle_reaction))
     app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_edit))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, main_message_handler))
     
     if app.job_queue: app.job_queue.run_repeating(check_demos, interval=60, first=10)
     
-    print("Bot v9.8 All-Scan Edition Started...")
+    print("Bot v10.0 Management Edition Started...")
     app.run_polling()
 
 if __name__ == "__main__":
