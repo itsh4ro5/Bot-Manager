@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 
 """
-ULTIMATE BOT MANAGER (v9.7 - Fixes & Enhanced Discovery)
+ULTIMATE BOT MANAGER (v9.8 - Fixes & Enhanced Logging)
 Fixes Implemented:
 1. /batches: Shows ALL connected chats (Passive Discovery added).
 2. /user: Only lists chats where user is ACTUALLY joined (Filters out 'Left'/'Kicked').
+3. FIXED: Demo Expiry Logic - Now logs errors and alerts admins if kicking fails.
 
 FEATURES INCLUDED:
 1.  Owner Commands: /addadmin, /deladmin, /backup, /allusers
@@ -15,7 +16,7 @@ FEATURES INCLUDED:
     - Free/Paid Batches Menus
     - Ticket Support System
 4.  Automation:
-    - 3-Hour Demo Timer (Restart Proof)
+    - 3-Hour Demo Timer (Restart Proof & Error Logs)
     - Auto-Kick on Expiry
     - Smart Topic Creation (No Duplicates)
     - History Search Link in Tickets
@@ -65,7 +66,7 @@ try:
         port = int(os.environ.get("PORT", "8080"))
         app = Flask(__name__)
         @app.route('/')
-        def index(): return "Bot Running - v9.7 Fixes", 200
+        def index(): return "Bot Running - v9.8 Fixed", 200
         
         def run():
             app.run(host="0.0.0.0", port=port, use_reloader=False)
@@ -800,25 +801,73 @@ async def on_join_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             expiry = time.time() + (3 * 3600)
             if "demos" not in DB["USER_DATA"][user.id]: DB["USER_DATA"][user.id]["demos"] = {}
             DB["USER_DATA"][user.id]["demos"][str(chat.id)] = expiry
+            logger.info(f"⏱ Demo started for {user.id} in {chat.id}. Expires: {expiry}")
+            
             del DB["PENDING_REQUESTS"][user.id]
             await save_data_async()
 
 async def check_demos(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Checks for expired demos every 60 seconds.
+    Updated to log errors and alert admins on failure.
+    """
     now = time.time()
     mod = False
-    for uid, data in DB["USER_DATA"].items():
-        if "demos" not in data: continue
-        d = data["demos"].copy()
-        for bid, expiry in d.items():
+    
+    # Use list() to avoid runtime error if dictionary changes size during iteration
+    for uid, data in list(DB["USER_DATA"].items()):
+        if "demos" not in data or not data["demos"]: 
+            continue
+        
+        # Create a copy of the demos dict to iterate while modifying the original
+        demos_copy = data["demos"].copy()
+        
+        for bid, expiry in demos_copy.items():
             if now > expiry:
-                try: 
-                    await context.bot.ban_chat_member(int(bid), uid)
-                    await context.bot.unban_chat_member(int(bid), uid)
-                    await context.bot.send_message(uid, "⏰ **Demo Expired.**")
-                except: pass
-                del data["demos"][bid]
-                mod = True
-    if mod: await save_data_async()
+                chat_id = int(bid)
+                user_id = int(uid)
+                
+                logger.info(f"⏳ Processing Demo Expiry: User {user_id} in Batch {chat_id}")
+                
+                try:
+                    # 1. Attempt to Ban (Kick)
+                    # We use ban then unban to kick without permanent ban
+                    await context.bot.ban_chat_member(chat_id, user_id)
+                    logger.info(f"✅ User {user_id} kicked from {chat_id}")
+                    
+                    # 2. Attempt to Unban (Allow rejoin)
+                    await context.bot.unban_chat_member(chat_id, user_id)
+                    
+                    # 3. Send Notification
+                    try:
+                        await context.bot.send_message(user_id, "⏰ **Demo Ended.**\nHope you enjoyed! Contact Admin for permanent access.")
+                    except Exception:
+                        pass # User might have blocked bot
+                        
+                except Exception as e:
+                    logger.error(f"❌ KICK FAILED for {user_id} in {chat_id}: {e}")
+                    # Notify Admin Channel if configured
+                    if LOG_CHANNEL_ID:
+                        try:
+                            err_msg = (
+                                f"⚠️ **DEMO KICK FAILED**\n"
+                                f"👤 User: `{user_id}`\n"
+                                f"🆔 Batch: `{chat_id}`\n"
+                                f"❓ Reason: `{e}`\n"
+                                f"ℹ️ *Make sure Bot is Admin with Ban rights!*"
+                            )
+                            await context.bot.send_message(LOG_CHANNEL_ID, err_msg, parse_mode=ParseMode.MARKDOWN)
+                        except: pass
+                
+                # 4. Remove from database regardless of success/failure
+                # If we don't remove, it will loop forever. 
+                # If it failed, the Admin Log above acts as the alert to fix permissions.
+                if bid in data["demos"]:
+                    del data["demos"][bid]
+                    mod = True
+
+    if mod: 
+        await save_data_async()
 
 # --- 13. USER UI ---
 
@@ -994,7 +1043,7 @@ def main():
     
     if app.job_queue: app.job_queue.run_repeating(check_demos, interval=60, first=10)
     
-    print("Bot v9.7 All-Scan Edition Started...")
+    print("Bot v9.8 All-Scan Edition Started...")
     app.run_polling()
 
 if __name__ == "__main__":
