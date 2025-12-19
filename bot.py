@@ -1469,39 +1469,79 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🚫 You are blocked.")
         return
         
-    if user.id not in DB["USER_DATA"]:
-        DB["USER_DATA"][user.id] = {"name": user.full_name, "username": user.username, "joined_at": time.time(), "demos": {}}
-        await save_data_async()
-    await get_or_create_topic(user, context)
-    
-    # 1. OWNER VIEW
+    if str(user.id) not in users:
+        users[str(user.id)] = {
+            "name": user.full_name,
+            "username": user.username,
+            "joined_at": str(datetime.now())
+        }
+        save_data()
+
+    # --- OWNER WELCOME MENU ---
     if user.id == OWNER_ID:
-        await update.message.reply_text(
-            f"👑 **WELCOME BOSS!**\n"
-            f"**⚙️ Owner:** `/addadmin`, `/deladmin`, `/backup`, `/allusers`\n"
-            f"**🛠 Manage:** `/find`, `/ban`, `/unban`, `/kick`, `/extend`\n"
-            f"**✅ Approve:** `/demo <link>`, `/per <link>`\n"
-            f"**📊 Tools:** `/stats`, `/batchstats`\n"
-            f"**📢 Broadcast:** `/broadcast`, `/post`, `/setwelcome`",
-            parse_mode=ParseMode.MARKDOWN
+        welcome_text = (
+            f"👑 <b>Welcome Boss! (Owner Dashboard)</b>\n\n"
+            f"System fully operational hai. Yahan aapke liye Master Commands hain:\n\n"
+            f"<b>🛠 System & Admin Controls:</b>\n"
+            f"<code>/addadmin &lt;id&gt;</code> - Naya Admin banayein\n"
+            f"<code>/deladmin &lt;id&gt;</code> - Admin remove karein\n"
+            f"<code>/backup</code> - Full Data Backup download karein\n"
+            f"<code>/allusers</code> - User list file generate karein\n\n"
+            f"<b>⚙️ Batch & Content Management:</b>\n"
+            f"<code>/addbatch</code> - Naya Channel/Group connect karein\n"
+            f"<code>/delbatch &lt;type&gt; &lt;id&gt;</code> - Batch delete karein\n"
+            f"<code>/broadcast</code> - Sabhi users ko message bhejein\n"
+            f"<code>/post</code> - Sabhi Batches me post karein\n\n"
+            f"<b>👥 User & Access Operations:</b>\n"
+            f"<code>/find &lt;username&gt;</code> - User details nikalein\n"
+            f"<code>/ban</code> | <code>/unban &lt;id&gt;</code> - User block/unblock\n"
+            f"<code>/demo &lt;link&gt;</code> - 3 Hours Access Grant karein\n"
+            f"<code>/per &lt;link&gt;</code> - Lifetime Access Grant karein\n\n"
+            f"<i>📊 System Stats dekhne ke liye /stats command use karein.</i>"
         )
-    # 2. ADMIN VIEW
-    elif is_admin(user.id):
-        await update.message.reply_text(
-            f"👮‍♂️ **WELCOME ADMIN!**\n"
-            f"**🛠 Manage:** `/find`, `/ban`, `/unban`, `/kick`, `/extend`\n"
-            f"**✅ Approve:** `/demo <link>`, `/per <link>`\n"
-            f"**📊 Tools:** `/stats`, `/batchstats`\n"
-            f"**📢 Broadcast:** `/broadcast`, `/post`, `/setwelcome`",
-            parse_mode=ParseMode.MARKDOWN
+        await context.bot.send_message(chat_id=chat_id, text=welcome_text, parse_mode='HTML')
+
+    # --- ADMIN WELCOME MENU ---
+    elif user.id in ADMIN_IDS:
+        welcome_text = (
+            f"👮‍♂️ <b>Welcome Admin!</b>\n\n"
+            f"Community manage karne ke liye niche diye gaye tools use karein:\n\n"
+            f"<b>📢 Content & Batches:</b>\n"
+            f"<code>/addbatch</code> - Naya Batch add karein\n"
+            f"<code>/broadcast</code> - Users ko announcement bhejein\n"
+            f"<code>/post</code> - Connected Channels me post karein\n"
+            f"<code>/batchstats</code> - Active Demo users ka count\n\n"
+            f"<b>👥 User Management:</b>\n"
+            f"<code>/find &lt;username&gt;</code> - User ID dhundein\n"
+            f"<code>/user &lt;id&gt;</code> - User ki history check karein\n"
+            f"<code>/ban</code> | <code>/unban &lt;id&gt;</code> - Access rokein\n"
+            f"<code>/kick &lt;uid&gt; &lt;bid&gt;</code> - User ko batch se nikalein\n\n"
+            f"<b>✅ Approval System (Links):</b>\n"
+            f"<code>/demo &lt;link&gt;</code> - 3 Hours Demo Access\n"
+            f"<code>/per &lt;link&gt;</code> - Permanent Access\n\n"
+            f"<i>🆘 Support: User ke messages ka reply seedhe Support Group me karein.</i>"
         )
-    # 3. USER VIEW
-    elif await check_membership(user.id, context):
-        await show_user_menu(update)
+        await context.bot.send_message(chat_id=chat_id, text=welcome_text, parse_mode='HTML')
+
+    # --- NORMAL USER WELCOME ---
     else:
-        kb = [[InlineKeyboardButton("📢 Join Channel", url=MANDATORY_CHANNEL_LINK)],
-              [InlineKeyboardButton("✅ Verified", callback_data="verify")]]
-        await update.message.reply_text("⚠️ **Join Main Channel First**", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+        welcome_text = (
+            f"👋 <b>Namaste {user.first_name}!</b>\n\n"
+            f"Main <b>Ultimate Bot Manager</b> hoon. Main aapki membership aur content access manage karta hoon.\n\n"
+            f"🆔 <b>Aapka User ID:</b> <code>{user.id}</code>\n\n"
+            f"✅ <b>Features:</b>\n"
+            f"• Agar aapne batch join kiya hai, to main membership track karunga.\n"
+            f"• Agar koi samasya ho, to yahan message bhejein, Admin aapse contact karenge.\n\n"
+            f"<i>Apna status check karne ke liye /myinfo dabayein.</i>"
+        )
+        
+        # User ke liye button bhi add kar dete hain professional look ke liye
+        keyboard = [
+            [InlineKeyboardButton("📂 My Status", callback_data='my_info')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await context.bot.send_message(chat_id=chat_id, text=welcome_text, parse_mode='HTML', reply_markup=reply_markup)
 
 def main():
     load_data()
